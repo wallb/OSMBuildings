@@ -1,6 +1,7 @@
 mesh.OBJ = (function() {
 
   var vertexIndex = [];
+  var texCoordIndex = [];
 
   function parseMTL(str) {
     var
@@ -75,8 +76,20 @@ mesh.OBJ = (function() {
           vertexIndex.push([parseFloat(cols[1]), parseFloat(cols[2]), parseFloat(cols[3])]);
           break;
 
+        case 'vt':
+          texCoordIndex.push([parseFloat(cols[1]), parseFloat(cols[2])]);
+          break;
+
         case 'f':
-          faces.push([ parseFloat(cols[1])-1, parseFloat(cols[2])-1, parseFloat(cols[3])-1 ]);
+	  tripletA = cols[1].split(/\/+/);
+	  tripletB = cols[2].split(/\/+/);
+	  tripletC = cols[3].split(/\/+/);
+          faces.push([
+	      // vertex indices for the face
+	      parseFloat(tripletA[0])-1, parseFloat(tripletB[0])-1, parseFloat(tripletC[0])-1,
+	      // texture coordinate indices for the face
+	      parseFloat(tripletA[1])-1, parseFloat(tripletB[1])-1, parseFloat(tripletC[1])-1
+	  ]);
           break;
       }
     }
@@ -94,7 +107,8 @@ mesh.OBJ = (function() {
         id: id,
         color: color,
         vertices: geometry.vertices,
-        normals: geometry.normals
+        normals: geometry.normals,
+        texCoords: geometry.texCoords
       });
     }
   }
@@ -104,7 +118,7 @@ mesh.OBJ = (function() {
       v0, v1, v2,
       e1, e2,
       nor, len,
-      geometry = { vertices:[], normals:[] };
+      geometry = { vertices:[], normals:[], texCoords:[] };
 
     for (var i = 0, il = faces.length; i < il; i++) {
       v0 = vertexIndex[ faces[i][0] ];
@@ -121,6 +135,10 @@ mesh.OBJ = (function() {
       nor[1] /= len;
       nor[2] /= len;
 
+      tc0 = texCoordIndex[ faces[i][3] ];
+      tc1 = texCoordIndex[ faces[i][4] ];
+      tc2 = texCoordIndex[ faces[i][5] ];
+
       geometry.vertices.push(
         v0[0], v0[2], v0[1],
         v1[0], v1[2], v1[1],
@@ -131,6 +149,12 @@ mesh.OBJ = (function() {
         nor[0], nor[1], nor[2],
         nor[0], nor[1], nor[2],
         nor[0], nor[1], nor[2]
+      );
+
+      geometry.texCoords.push(
+        tc0[0], tc0[1],
+        tc1[0], tc1[1],
+        tc2[0], tc2[1]
       );
     }
 
@@ -161,6 +185,7 @@ mesh.OBJ = (function() {
 
     this.data = {
       vertices: [],
+      texCoords: [],
       normals: [],
       colors: [],
       ids: []
@@ -200,6 +225,7 @@ mesh.OBJ = (function() {
 
         this.data.vertices = this.data.vertices.concat(item.vertices);
         this.data.normals  = this.data.normals.concat(item.normals);
+        this.data.texCoords  = this.data.texCoords.concat(item.texCoords);
 
         id = this.id || item.id;
         idColor = render.Picking.idToColor(id);
@@ -241,6 +267,7 @@ mesh.OBJ = (function() {
 
     onReady: function() {
       this.vertexBuffer = new glx.Buffer(3, new Float32Array(this.data.vertices));
+      this.texCoordBuffer = new glx.Buffer(2, new Float32Array(this.data.texCoords));
       this.normalBuffer = new glx.Buffer(3, new Float32Array(this.data.normals));
       this.colorBuffer  = new glx.Buffer(3, new Float32Array(this.data.colors));
       this.idBuffer     = new glx.Buffer(3, new Float32Array(this.data.ids));
@@ -291,6 +318,7 @@ mesh.OBJ = (function() {
 
       if (this.isReady) {
         this.vertexBuffer.destroy();
+        this.texCoordBuffer.destroy();
         this.normalBuffer.destroy();
         this.colorBuffer.destroy();
         this.idBuffer.destroy();
