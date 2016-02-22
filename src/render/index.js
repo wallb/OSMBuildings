@@ -75,6 +75,10 @@ var render = {
   renderFrame: function() {
     Filter.nextTick();
 
+    if (this.updateCallback) {
+      this.updateCallback();
+    }
+
     requestAnimationFrame( this.renderFrame.bind(this));
     
     gl.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 1);
