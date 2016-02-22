@@ -36,11 +36,8 @@ var OSMBuildings = function(options) {
 
   APP.highQuality = !options.lowQuality;
 
-  render.effects = {};
   var effects = options.effects || [];
-  for (var i = 0; i < effects.length; i++) {
-    render.effects[ effects[i] ] = true;
-  }
+  this.setEffects(effects);
 
   this.attribution = options.attribution || OSMBuildings.ATTRIBUTION;
 
@@ -100,6 +97,13 @@ OSMBuildings.prototype = {
     //  DEFAULT_COLOR = color.toArray();
     //}
     return this;
+  },
+
+  setEffects: function(effects) {
+    render.effects = {};
+    for (var i = 0; i < effects.length; i++) {
+      render.effects[ effects[i] ] = true;
+    }
   },
 
   setDate: function(date) {
@@ -197,6 +201,11 @@ OSMBuildings.prototype = {
   getTarget: function(x, y, callback) {
     // TODO: use promises here
     render.Picking.getTarget(x, y, callback);
+    return this;
+  },
+
+  onUpdate: function(callback) {
+    render.updateCallback = callback;
     return this;
   },
 
