@@ -277,6 +277,9 @@ mesh.OBJ = (function() {
       Filter.apply(this);
       data.Index.add(this);
 
+      vertexIndex.length = 0;
+      texCoordIndex.length = 0;
+
       this.isReady = true;
       Activity.setIdle();
     },
