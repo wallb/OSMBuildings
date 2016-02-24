@@ -131,7 +131,7 @@ Pointer.prototype = {
     }
 
     if (!this.disabled) {
-      var adjust = 0.2*(delta>0 ? 1 : delta<0 ? -1 : 0);
+      var adjust = 0.2*(delta>0 ? 0.1 : delta<0 ? -0.1 : 0);
       this.map.setZoom(this.map.zoom + adjust, e);
     }
 
