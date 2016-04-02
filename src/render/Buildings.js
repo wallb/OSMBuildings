@@ -3,8 +3,7 @@ render.Buildings = {
 
   init: function() {
   
-    this.shader = !render.effects.shadows ?
-      new glx.Shader({
+    this.shaderNoShadows = new glx.Shader({
         vertexShader: Shaders.buildings.vertex,
         fragmentShader: Shaders.buildings.fragment,
         attributes: ['aPosition', 'aTexCoord', 'aColor', 'aFilter', 'aNormal', 'aID'],
@@ -29,7 +28,8 @@ render.Buildings = {
           'uTime',
           'uWallTexIndex'
         ]
-      }) : new glx.Shader({
+    });
+    this.shaderShadows = new glx.Shader({
         vertexShader: Shaders['buildings.shadows'].vertex,
         fragmentShader: Shaders['buildings.shadows'].fragment,
         attributes: ['aPosition', 'aTexCoord', 'aColor', 'aFilter', 'aNormal', 'aID'],
@@ -67,7 +67,7 @@ render.Buildings = {
 
   render: function(depthFramebuffer, shadowStrength) {
 
-    var shader = this.shader;
+    var shader = depthFramebuffer ? this.shaderShadows : this.shaderNoShadows;
     shader.enable();
 
     if (this.showBackfaces) {
