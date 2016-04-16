@@ -1,8 +1,5 @@
 mesh.OBJ = (function() {
 
-  var vertexIndex = [];
-  var texCoordIndex = [];
-
   function parseMTL(str) {
     var
       lines = str.split(/[\r\n]/g),
@@ -47,6 +44,8 @@ mesh.OBJ = (function() {
 
   function parseOBJ(str, materials) {
     var
+      vertexIndex = [],
+      texCoordIndex = [],
       lines = str.split(/[\r\n]/g), cols,
       meshes = [],
       id,
@@ -59,13 +58,13 @@ mesh.OBJ = (function() {
       switch (cols[0]) {
         case 'g':
         case 'o':
-          storeOBJ(meshes, id, color, faces);
+          storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces);
           id = cols[1];
           faces = [];
           break;
 
         case 'usemtl':
-          storeOBJ(meshes, id, color, faces);
+          storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces);
           if (materials[ cols[1] ]) {
             color = materials[ cols[1] ];
           }
@@ -94,15 +93,15 @@ mesh.OBJ = (function() {
       }
     }
 
-    storeOBJ(meshes, id, color, faces);
+    storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces);
     str = null;
 
     return meshes;
   }
 
-  function storeOBJ(meshes, id, color, faces) {
+  function storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces) {
     if (faces.length) {
-      var geometry = createGeometry(faces);
+      var geometry = createGeometry(vertexIndex, texCoordIndex, faces);
       meshes.push({
         id: id,
         color: color,
@@ -113,7 +112,7 @@ mesh.OBJ = (function() {
     }
   }
 
-  function createGeometry(faces) {
+  function createGeometry(vertexIndex, texCoordIndex, faces) {
     var
       v0, v1, v2,
       e1, e2,
@@ -135,10 +134,16 @@ mesh.OBJ = (function() {
       nor[1] /= len;
       nor[2] /= len;
 
-      tc0 = texCoordIndex[ faces[i][3] ];
-      tc1 = texCoordIndex[ faces[i][4] ];
-      tc2 = texCoordIndex[ faces[i][5] ];
-
+      if (texCoordIndex.length) {
+        tc0 = texCoordIndex[ faces[i][3] ];
+        tc1 = texCoordIndex[ faces[i][4] ];
+        tc2 = texCoordIndex[ faces[i][5] ];
+      } else {
+        tc0 = [0.0, 0.0];
+        tc1 = [0.0, 0.0];
+        tc2 = [0.0, 0.0];
+      }
+	
       geometry.vertices.push(
         v0[0], v0[2], v0[1],
         v1[0], v1[2], v1[1],
@@ -184,11 +189,11 @@ mesh.OBJ = (function() {
     }
 
     this.data = {
-      vertices: [],
-      texCoords: [],
-      normals: [],
       colors: [],
-      ids: []
+      ids: [],
+      vertices: [],
+      normals: [],
+      texCoords: []
     };
 
     Activity.setBusy();
@@ -209,35 +214,36 @@ mesh.OBJ = (function() {
   constructor.prototype = {
     onLoad: function(obj, mtl) {
       this.items = [];
-      // TODO: add single parsed items directly and save intermediate data storage
-      this.addItems(parseOBJ(obj, mtl));
+      this.addItems( parseOBJ(obj, mtl) );
       this.onReady();
     },
 
     addItems: function(items) {
       var
-        item, color, idColor, j, jl,
+        feature, color, idColor, j, jl,
         id, colorVariance,
         defaultColor = new Color(DEFAULT_COLOR).toArray();
 
       for (var i = 0, il = items.length; i < il; i++) {
-        item = items[i];
+        feature = items[i];
 
-        this.data.vertices = this.data.vertices.concat(item.vertices);
-        this.data.normals  = this.data.normals.concat(item.normals);
-        this.data.texCoords  = this.data.texCoords.concat(item.texCoords);
+        this.data.vertices  = this.data.vertices.concat(feature.vertices);
+        this.data.normals   = this.data.normals.concat(feature.normals);
+        this.data.texCoords = this.data.texCoords.concat(feature.texCoords);
 
-        id = this.id || item.id;
+        id = this.id || feature.id;
         idColor = render.Picking.idToColor(id);
 
         colorVariance = (id/2 % 2 ? -1 : +1) * (id % 2 ? 0.03 : 0.06);
-        color = this.color || item.color || defaultColor;
-        for (j = 0, jl = item.vertices.length - 2; j<jl; j += 3) {
+        color = this.color || feature.color || defaultColor;
+        for (j = 0, jl = feature.vertices.length - 2; j<jl; j += 3) {
           this.data.colors.push(color[0]+colorVariance, color[1]+colorVariance, color[2]+colorVariance);
           this.data.ids.push(idColor[0], idColor[1], idColor[2]);
         }
 
-        this.items.push({ id:id, vertexCount:item.vertices.length/3, data:item.data });
+        this.items.push({ id:id, vertexCount:feature.vertices.length/3, data:feature.data });
+
+        APP.emit('loadfeature', feature);
       }
     },
 
@@ -266,19 +272,16 @@ mesh.OBJ = (function() {
     },
 
     onReady: function() {
-      this.vertexBuffer = new glx.Buffer(3, new Float32Array(this.data.vertices));
+      this.vertexBuffer   = new glx.Buffer(3, new Float32Array(this.data.vertices));
+      this.normalBuffer   = new glx.Buffer(3, new Float32Array(this.data.normals));
       this.texCoordBuffer = new glx.Buffer(2, new Float32Array(this.data.texCoords));
-      this.normalBuffer = new glx.Buffer(3, new Float32Array(this.data.normals));
-      this.colorBuffer  = new glx.Buffer(3, new Float32Array(this.data.colors));
-      this.idBuffer     = new glx.Buffer(3, new Float32Array(this.data.ids));
+      this.colorBuffer    = new glx.Buffer(3, new Float32Array(this.data.colors));
+      this.idBuffer       = new glx.Buffer(3, new Float32Array(this.data.ids));
       this.fadeIn();
       this.data = null;
 
       Filter.apply(this);
       data.Index.add(this);
-
-      vertexIndex.length = 0;
-      texCoordIndex.length = 0;
 
       this.isReady = true;
       Activity.setIdle();

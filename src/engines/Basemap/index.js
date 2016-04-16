@@ -188,10 +188,10 @@ Basemap.prototype = {
 
       /* if a screen position was given for which the geographic position displayed
        * should not change under the zoom */
-      if (e) {  
-        //FIXME: add code; this needs to take the current camera (rotation and 
+      if (e) {
+        //FIXME: add code; this needs to take the current camera (rotation and
         //       perspective) into account
-        //NOTE:  the old code (comment out below) only works for north-up 
+        //NOTE:  the old code (comment out below) only works for north-up
         //       non-perspective views
         /*
         var dx = this.container.offsetWidth/2  - e.clientX;
@@ -203,6 +203,7 @@ Basemap.prototype = {
         this.center.x += dx;
         this.center.y += dy;*/
       }
+      this.emit('zoom', { zoom: zoom });
       this.emit('change');
     }
     return this;
@@ -213,10 +214,12 @@ Basemap.prototype = {
   },
 
   setPosition: function(pos) {
-    this.position = {
-      latitude:  clamp(parseFloat(pos.latitude), -90, 90),
-      longitude: clamp(parseFloat(pos.longitude), -180, 180)
-    };
+    var lat = parseFloat(pos.latitude);
+    var lon = parseFloat(pos.longitude);
+    if (isNaN(lat) || isNaN(lon)) {
+      return;
+    }
+    this.position = { latitude:clamp(lat, -90, 90), longitude:clamp(lon, -180, 180) };
     this.emit('change');
     return this;
   },
@@ -229,7 +232,7 @@ Basemap.prototype = {
     if (size.width !== this.width || size.height !== this.height) {
       this.width = size.width;
       this.height = size.height;
-      this.emit('resize');
+      this.emit('resize', { width: this.width, height: this.height });
     }
     return this;
   },
@@ -242,6 +245,7 @@ Basemap.prototype = {
     rotation = parseFloat(rotation)%360;
     if (this.rotation !== rotation) {
       this.rotation = rotation;
+      this.emit('rotate', { rotation: rotation });
       this.emit('change');
     }
     return this;
@@ -255,6 +259,7 @@ Basemap.prototype = {
     tilt = clamp(parseFloat(tilt), 0, 50); // bigger max increases shadow moire on base map
     if (this.tilt !== tilt) {
       this.tilt = tilt;
+      this.emit('tilt', { tilt: tilt });
       this.emit('change');
     }
     return this;

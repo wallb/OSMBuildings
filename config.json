@@ -1,9 +1,9 @@
 {
-  "shaders": ["interaction", "buildings", "buildings.shadows", "flatColor", "skydome", "basemap", "texture", "normalmap", "depth", "ambientFromDepth", "blur", "basemap.shadows"],
+  "shaders": ["interaction", "buildings", "buildings.shadows", "flatColor", "skywall", "basemap", "texture", "fogNormal", "ambientFromDepth", "blur", "basemap.shadows"],
 
   "lib": [
-    "lib/earcut.dev.js",
-    "node_modules/Color/dist/Color.debug.js",
+    "node_modules/Triangulate/dist/Triangulate.js",
+    "node_modules/Color/src/Color.js",
     "lib/GLX.debug.js",
     "node_modules/suncalc/suncalc.js"
   ],
@@ -41,8 +41,7 @@
     "src/render/MapShadows.js",
     "src/render/Basemap.js",
     "src/render/HudRect.js",
-    "src/render/NormalMap.js",
-    "src/render/DepthMap.js",
+    "src/render/DepthFogNormalMap.js",
     "src/render/AmbientMap.js",
     "src/render/Overlay.js",
     "src/render/Blur.js",

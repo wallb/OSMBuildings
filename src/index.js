@@ -49,7 +49,7 @@ var OSMBuildings = function(options) {
 };
 
 OSMBuildings.VERSION = '{{VERSION}}';
-OSMBuildings.ATTRIBUTION = '<a href="https://osmbuildings.org">© OSM Buildings</a>';
+OSMBuildings.ATTRIBUTION = '<a href="http://osmbuildings.org">© OSM Buildings</a>';
 
 OSMBuildings.prototype = {
 
@@ -93,9 +93,8 @@ OSMBuildings.prototype = {
     //render.highlightColor  = new Color(options.highlightColor  || HIGHLIGHT_COLOR).toArray();
 
     DEFAULT_COLOR = style.color || style.wallColor || DEFAULT_COLOR;
-    //if (color.isValid) {
-    //  DEFAULT_COLOR = color.toArray();
-    //}
+    // is color valid?
+    // DEFAULT_COLOR = color.toArray();
     return this;
   },
 
