@@ -74,6 +74,7 @@
     "src/render/Overlay.js",
     "src/render/OutlineMap.js",
     "src/render/Blur.js",
+    "src/render/FrameControl.js",
 
     "src/basemap/index.js",
     "src/basemap/Tile.js"

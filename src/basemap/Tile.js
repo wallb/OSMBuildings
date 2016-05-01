@@ -36,6 +36,7 @@ basemap.Tile.prototype = {
       Activity.setIdle();
       if (image) {
         this.isReady = true;
+        render.FrameControl.requestFrame();
         /* The whole texture will be mapped to fit the whole tile exactly. So
          * don't attempt to wrap around the texture coordinates. */
         GL.bindTexture(GL.TEXTURE_2D, this.texture.id);

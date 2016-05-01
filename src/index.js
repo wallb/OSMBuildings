@@ -61,6 +61,10 @@ var OSMBuildings = function(options) {
   if (APP.maxZoom < APP.minZoom) {
     APP.maxZoom = APP.minZoom;
   }
+
+  if (options.frameControl) {
+    render.FrameControl.enable();
+  }
 };
 
 OSMBuildings.VERSION = '{{VERSION}}';
@@ -136,6 +140,7 @@ OSMBuildings.prototype = {
     DEFAULT_COLOR = style.color || style.wallColor || DEFAULT_COLOR;
     // is color valid?
     // DEFAULT_COLOR = color.toArray();
+    render.FrameControl.requestFrame();
     return this;
   },
 
@@ -145,6 +150,7 @@ OSMBuildings.prototype = {
    */
   setDate: function(date) {
     Sun.setDate(typeof date === 'string' ? new Date(date) : date);
+    render.FrameControl.requestFrame();
     return this;
   },
 
@@ -281,6 +287,7 @@ OSMBuildings.prototype = {
    */
   highlight: function(id) {
     render.Buildings.highlightID = id ? render.Picking.idToColor(id) : null;
+    render.FrameControl.requestFrame();
     return this;
   },
 
@@ -298,6 +305,7 @@ OSMBuildings.prototype = {
    */
   show: function(selector, duration) {
     Filter.remove('hidden', selector, duration);
+    render.FrameControl.requestFramesUntilTime(Date.now() + duration);
     return this;
   },
 
@@ -309,6 +317,7 @@ OSMBuildings.prototype = {
   */
   hide: function(selector, duration) {
     Filter.add('hidden', selector, duration);
+    render.FrameControl.requestFramesUntilTime(Date.now() + duration);
     return this;
   },
 
