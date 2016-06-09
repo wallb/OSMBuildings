@@ -61,8 +61,11 @@ var render = {
     }
 
     requestAnimationFrame( this.renderFrame.bind(this));
-
-    this.onChange();    
+    if (!render.FrameControl.haveFrameRequest()) {
+      return;
+    }
+    
+    //this.onChange();    
     GL.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 0.0);
     GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
@@ -218,6 +221,7 @@ var render = {
     /* fogBlurDistance: closest distance *beyond* fogDistance at which everything is
      *                  completely enclosed in fog. */
     this.fogBlurDistance = 500;
+    render.FrameControl.requestFrame();
   },
 
   onResize: function() {

@@ -3524,11 +3524,8 @@ var OSMBuildings = function(options) {
 
   APP.highQuality = !options.fastMode;
 
-  render.effects = {};
   var effects = options.effects || [];
-  for (var i = 0; i < effects.length; i++) {
-    render.effects[ effects[i] ] = true;
-  }
+  this.setEffects(effects);
 
   this.attribution = options.attribution || OSMBuildings.ATTRIBUTION;
 
@@ -3536,6 +3533,10 @@ var OSMBuildings = function(options) {
   APP.maxZoom = parseFloat(options.maxZoom) || 22;
   if (APP.maxZoom < APP.minZoom) {
     APP.maxZoom = APP.minZoom;
+  }
+
+  if (options.frameControl) {
+    render.FrameControl.enable();
   }
 };
 
@@ -3612,7 +3613,15 @@ OSMBuildings.prototype = {
     DEFAULT_COLOR = style.color || style.wallColor || DEFAULT_COLOR;
     // is color valid?
     // DEFAULT_COLOR = color.toArray();
+    render.FrameControl.requestFrame();
     return this;
+  },
+
+  setEffects: function(effects) {
+    render.effects = {};
+    for (var i = 0; i < effects.length; i++) {
+      render.effects[ effects[i] ] = true;
+    }
   },
 
   /**
@@ -3621,6 +3630,7 @@ OSMBuildings.prototype = {
    */
   setDate: function(date) {
     Sun.setDate(typeof date === 'string' ? new Date(date) : date);
+    render.FrameControl.requestFrame();
     return this;
   },
 
@@ -3757,6 +3767,7 @@ OSMBuildings.prototype = {
    */
   highlight: function(id) {
     render.Buildings.highlightID = id ? render.Picking.idToColor(id) : null;
+    render.FrameControl.requestFrame();
     return this;
   },
 
@@ -3774,6 +3785,7 @@ OSMBuildings.prototype = {
    */
   show: function(selector, duration) {
     Filter.remove('hidden', selector, duration);
+    render.FrameControl.requestFramesUntilTime(Date.now() + duration);
     return this;
   },
 
@@ -3785,6 +3797,7 @@ OSMBuildings.prototype = {
   */
   hide: function(selector, duration) {
     Filter.add('hidden', selector, duration);
+    render.FrameControl.requestFramesUntilTime(Date.now() + duration);
     return this;
   },
 
@@ -3802,6 +3815,11 @@ OSMBuildings.prototype = {
   getTarget: function(x, y, callback) {
     // TODO: use promises here
     render.Picking.getTarget(x, y, callback);
+    return this;
+  },
+
+  onUpdate: function(callback) {
+    render.updateCallback = callback;
     return this;
   },
 
@@ -4366,7 +4384,7 @@ var Filter = {
     var item;
     var j, jl;
 
-    var start = this.time();
+    var start = this.getTime();
     var end = start+duration;
 
     for (var i = 0, il = data.Index.items.length; i<il; i++) {
@@ -4402,7 +4420,7 @@ var Filter = {
     var item;
     var j, jl;
 
-    var start = this.time();
+    var start = this.getTime();
     var end = start+duration;
 
     for (i = 0, il = data.Index.items.length; i<il; i++) {
@@ -4636,6 +4654,7 @@ mesh.GeoJSON = (function() {
     fadeIn: function() {
       var item, filters = [];
       var start = Filter.getTime() + 250, end = start + 500;
+      render.FrameControl.requestFramesUntilTime(Date.now() + 750);
       for (var i = 0, il = this.items.length; i < il; i++) {
         item = this.items[i];
         item.filter = [start, end, 0, 1];
@@ -4968,6 +4987,7 @@ mesh.OBJ = (function() {
   function parseOBJ(str, materials) {
     var
       vertexIndex = [],
+      texCoordIndex = [],
       lines = str.split(/[\r\n]/g), cols,
       meshes = [],
       id,
@@ -4980,13 +5000,13 @@ mesh.OBJ = (function() {
       switch (cols[0]) {
         case 'g':
         case 'o':
-          storeOBJ(vertexIndex, meshes, id, color, faces);
+          storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces);
           id = cols[1];
           faces = [];
           break;
 
         case 'usemtl':
-          storeOBJ(vertexIndex, meshes, id, color, faces);
+          storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces);
           if (materials[ cols[1] ]) {
             color = materials[ cols[1] ];
           }
@@ -4997,21 +5017,33 @@ mesh.OBJ = (function() {
           vertexIndex.push([parseFloat(cols[1]), parseFloat(cols[2]), parseFloat(cols[3])]);
           break;
 
+        case 'vt':
+          texCoordIndex.push([parseFloat(cols[1]), parseFloat(cols[2])]);
+          break;
+
         case 'f':
-          faces.push([ parseFloat(cols[1])-1, parseFloat(cols[2])-1, parseFloat(cols[3])-1 ]);
+	  tripletA = cols[1].split(/\/+/);
+	  tripletB = cols[2].split(/\/+/);
+	  tripletC = cols[3].split(/\/+/);
+          faces.push([
+	      // vertex indices for the face
+	      parseFloat(tripletA[0])-1, parseFloat(tripletB[0])-1, parseFloat(tripletC[0])-1,
+	      // texture coordinate indices for the face
+	      parseFloat(tripletA[1])-1, parseFloat(tripletB[1])-1, parseFloat(tripletC[1])-1
+	  ]);
           break;
       }
     }
 
-    storeOBJ(vertexIndex, meshes, id, color, faces);
+    storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces);
     str = null;
 
     return meshes;
   }
 
-  function storeOBJ(vertexIndex, meshes, id, color, faces) {
+  function storeOBJ(vertexIndex, texCoordIndex, meshes, id, color, faces) {
     if (faces.length) {
-      var geometry = createGeometry(vertexIndex, faces);
+      var geometry = createGeometry(vertexIndex, texCoordIndex, faces);
       meshes.push({
         id: id,
         color: color,
@@ -5022,7 +5054,7 @@ mesh.OBJ = (function() {
     }
   }
 
-  function createGeometry(vertexIndex, faces) {
+  function createGeometry(vertexIndex, texCoordIndex, faces) {
     var
       v0, v1, v2,
       nor,
@@ -5035,6 +5067,16 @@ mesh.OBJ = (function() {
 
       nor = normal(v0, v1, v2);
 
+      if (texCoordIndex.length) {
+        tc0 = texCoordIndex[ faces[i][3] ];
+        tc1 = texCoordIndex[ faces[i][4] ];
+        tc2 = texCoordIndex[ faces[i][5] ];
+      } else {
+        tc0 = [0.0, 0.0];
+        tc1 = [0.0, 0.0];
+        tc2 = [0.0, 0.0];
+      }
+	
       geometry.vertices.push(
         v0[0], v0[2], v0[1],
         v1[0], v1[2], v1[1],
@@ -5048,11 +5090,10 @@ mesh.OBJ = (function() {
       );
 
       geometry.texCoords.push(
-        0.0, 0.0,
-        0.0, 0.0,
-        0.0, 0.0
+        tc0[0], tc0[1],
+        tc1[0], tc1[1],
+        tc2[0], tc2[1]
       );
-
     }
 
     return geometry;
@@ -5142,6 +5183,7 @@ mesh.OBJ = (function() {
     fadeIn: function() {
       var item, filters = [];
       var start = Filter.getTime() + 250, end = start + 500;
+      render.FrameControl.requestFramesUntilTime(Date.now() + 750);
       for (var i = 0, il = this.items.length; i < il; i++) {
         item = this.items[i];
         item.filter = [start, end, 0, 1];
@@ -5216,6 +5258,7 @@ mesh.OBJ = (function() {
 
       if (this.isReady) {
         this.vertexBuffer.destroy();
+        this.texCoordBuffer.destroy();
         this.normalBuffer.destroy();
         this.colorBuffer.destroy();
         this.idBuffer.destroy();
@@ -5694,9 +5737,17 @@ var render = {
   
   renderFrame: function() {
     Filter.nextTick();
-    requestAnimationFrame( this.renderFrame.bind(this));
 
-    this.onChange();    
+    if (this.updateCallback) {
+      this.updateCallback();
+    }
+
+    requestAnimationFrame( this.renderFrame.bind(this));
+    if (!render.FrameControl.haveFrameRequest()) {
+      return;
+    }
+    
+    //this.onChange();    
     GL.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 0.0);
     GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
@@ -5852,6 +5903,7 @@ var render = {
     /* fogBlurDistance: closest distance *beyond* fogDistance at which everything is
      *                  completely enclosed in fog. */
     this.fogBlurDistance = 500;
+    render.FrameControl.requestFrame();
   },
 
   onResize: function() {
@@ -6169,8 +6221,7 @@ render.Buildings = {
 
   init: function() {
   
-    this.shader = !render.effects.shadows ?
-      new GLX.Shader({
+    this.shaderNoShadows = new GLX.Shader({
         vertexShader: Shaders.buildings.vertex,
         fragmentShader: Shaders.buildings.fragment,
         shaderName: 'building shader',
@@ -6190,7 +6241,8 @@ render.Buildings = {
           'uTime',
           'uWallTexIndex'
         ]
-      }) : new GLX.Shader({
+    });
+    this.shaderShadows = new GLX.Shader({
         vertexShader: Shaders['buildings.shadows'].vertex,
         fragmentShader: Shaders['buildings.shadows'].fragment,
         shaderName: 'quality building shader',
@@ -6221,7 +6273,7 @@ render.Buildings = {
 
   render: function(depthFramebuffer, shadowStrength) {
 
-    var shader = this.shader;
+    var shader = depthFramebuffer ? this.shaderShadows : this.shaderNoShadows;
     shader.enable();
 
     if (this.showBackfaces) {
@@ -6937,6 +6989,147 @@ render.Blur.prototype.destroy = function()
   }
 };
 
+/*
+ * FrameControl provides a mechanism for rendering a new frame only when
+ * needed. The goal is to reduce the CPU and GPU usage during times when
+ * no visual changes occur. FrameControl in itself is only the 'bookkeeping'
+ * part. For this to work, the code that will cause a visual change must do
+ * one of two things. Either explicitly request a new frame by calling one of
+ *   render.FrameControl.requestFrame();
+ *   render.FrameControl.requestFramesUntilTime();
+ * or emit one of the events that FrameControl is listening to (see below).
+ *
+ * FrameControl is disabled by default, meaning frames will be redrawn
+ * continuously.
+ */
+
+render.FrameControl = {
+
+  // Events from actions that may require a redraw
+  appEvents: ['loadfeature'],
+  mapEvents: ['change', 'resize'],
+
+  enabled: false, // Deactivated by default
+
+  numRequestedFrames: 0,
+  framesRequestedUntilTime: 0, // Timestamp
+
+  init: function() {},
+
+  /*
+   * Enables FrameControl.
+   * Frames will be rendered only when necessary.
+   */
+  enable: function() {
+    this.enabled = true;
+    this.addListeners();
+  },
+
+  /*
+   * Disables FrameControl.
+   * Frames will be rendered continuously.
+   */
+  disable: function() {
+    this.enabled = false;
+    this.removeListeners();
+  },
+
+  addListeners: function() {
+    if (APP && MAP) {
+      if (!this.haveAddedAppListeners) {
+        for (var i = 0; i < this.appEvents.length; i++) {
+          APP.on(this.appEvents[i], this.requestFrame.bind(this));
+        }
+        this.haveAddedAppListeners = true;
+      }
+      if (!this.haveAddedMapListeners) {
+        for (var j = 0; j < this.mapEvents.length; j++) {
+          MAP.on(this.mapEvents[j], this.requestFrame.bind(this));
+        }
+        this.haveAddedMapListeners = true;
+      }
+    }
+  },
+
+  removeListeners: function() {
+    if (this.haveAddedAppListeners) {
+      for (var i = 0; i < this.appEvents.length; i++) {
+        APP.off(this.appEvents[i], this.requestFrame.bind(this));
+      }
+      this.haveAddedAppListeners = false;
+    }
+    if (this.haveAddedMapListeners) {
+      for (var j = 0; j < this.mapEvents.length; j++) {
+        MAP.off(this.appEvents[j], this.requestFrame.bind(this));
+      }
+      this.haveAddedMapListeners = false;
+    }
+  },
+
+  /*
+   * Request that a new frame should be rendered.
+   */
+  requestFrame: function() {
+    this.requestFrames(1);
+  },
+
+  /*
+   * Request that the specified number of frames should be rendered.
+   * @param {Number} numFrames The number of frames that should be rendered.
+   */
+  requestFrames: function(numFrames) {
+    if (this.numRequestedFrames < numFrames) {
+      this.numRequestedFrames = numFrames;
+    }
+  },
+
+  /*
+   * Request that new frames should be rendered until the specified time.
+   *
+   * @param {Number} timestamp The end time, in milliseconds (Unix epoch).
+   */
+  requestFramesUntilTime: function(timestamp) {
+    if (this.framesRequestedUntilTime < timestamp) {
+      this.framesRequestedUntilTime = timestamp;
+    }
+  },
+
+  /*
+   * Used to check if a frame has been requested.
+   * NOTE: This can have the side effect of decreasing the number of requested frames.
+   *
+   * @return {Boolean} Whether a new frame have been requested
+   */
+  haveFrameRequest: function() {
+    if (!this.enabled) {
+      // Constant 'request' for new frames when FrameControl
+      // is disabled
+      return true;
+    }
+
+    if (!this.haveAddedAppListeners ||
+        !this.haveAddedMapListeners) {
+      this.addListeners();
+      return true;
+    }
+
+    if (this.numRequestedFrames > 0) {
+      this.numRequestedFrames--;
+      return true;
+    }
+
+    if (Date.now() <= this.framesRequestedUntilTime) {
+      return true;
+    }
+
+    return false;
+  },
+
+  destroy: function() {
+    this.removeListeners();
+  }
+};
+
 
 var basemap = {};
 
@@ -6978,6 +7171,7 @@ basemap.Tile.prototype = {
       Activity.setIdle();
       if (image) {
         this.isReady = true;
+        render.FrameControl.requestFrame();
         /* The whole texture will be mapped to fit the whole tile exactly. So
          * don't attempt to wrap around the texture coordinates. */
         GL.bindTexture(GL.TEXTURE_2D, this.texture.id);
