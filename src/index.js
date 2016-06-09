@@ -1,5 +1,5 @@
 var APP;
-var MAP, glx, gl;
+var MAP, GL;
 /*
  * Note: OSMBuildings cannot use a single global world coordinate system.
  *       The numerical accuracy required for such a system would be about
@@ -76,7 +76,7 @@ OSMBuildings.prototype = {
    * @param {OSMBuildings~eventListenerFunction} callback
    */
   on: function(type, fn) {
-    gl.canvas.addEventListener(type, fn);
+    GL.canvas.addEventListener(type, fn);
     return this;
   },
 
@@ -86,12 +86,12 @@ OSMBuildings.prototype = {
    * @param {OSMBuildings~eventListenerFunction} [fn] - If given, only remove the given function
    */
   off: function(type, fn) {
-    gl.canvas.removeEventListener(type, fn);
+    GL.canvas.removeEventListener(type, fn);
   },
 
   emit: function(type, detail) {
     var event = new CustomEvent(type, { detail:detail });
-    gl.canvas.dispatchEvent(event);
+    GL.canvas.dispatchEvent(event);
   },
 
   /**
@@ -100,8 +100,7 @@ OSMBuildings.prototype = {
    */
   addTo: function(map) {
     MAP = map;
-    glx = new GLX(MAP.container, MAP.width, MAP.height, APP.highQuality);
-    gl = glx.context;
+    GL = GLX.init(MAP.container, MAP.width, MAP.height, APP.highQuality);
 
     MAP.addLayer(this);
 
@@ -186,7 +185,7 @@ OSMBuildings.prototype = {
    * @param {Integer} y - the y position in the viewport
    */
   unproject: function(x, y) {
-    var inverse = glx.Matrix.invert(render.viewProjMatrix.data);
+    var inverse = GLX.Matrix.invert(render.viewProjMatrix.data);
     /* convert window/viewport coordinates to NDC [0..1]. Note that the browser
      * screen coordinates are y-down, while the WebGL NDC coordinates are y-up,
      * so we have to invert the y value here */
@@ -207,6 +206,7 @@ OSMBuildings.prototype = {
 
   /**
    * Adds an OBJ (3D object) file to the map
+   * Important: objects with same url are cached and only loaded once
    * @param {String} url - URL of the OBJ file
    * @param {Object} position - Where to render the OBJ
    * @param {Float} position.latitude - Latitude for the OBJ
@@ -362,16 +362,16 @@ OSMBuildings.prototype = {
     if (APP.dataGrid)    APP.dataGrid.destroy();
 
     // TODO: when taking over an existing canvas, don't destroy it here
-    glx.destroy();
+    GLX.destroy();
   }
 };
 
 //*****************************************************************************
 
-if (typeof global.define === 'function') {
-  global.define([], OSMBuildings);
-} else if (typeof global.exports === 'object') {
-  global.module.exports = OSMBuildings;
+if (typeof define === 'function') {
+  define([], OSMBuildings);
+} else if (typeof module === 'object') {
+  module.exports = OSMBuildings;
 } else {
-  global.OSMBuildings = OSMBuildings;
+  window.OSMBuildings = OSMBuildings;
 }

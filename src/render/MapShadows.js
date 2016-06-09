@@ -7,7 +7,7 @@
 render.MapShadows = {
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader: Shaders['basemap.shadows'].vertex,
       fragmentShader: Shaders['basemap.shadows'].fragment,
       shaderName: 'map shadows shader',
@@ -35,7 +35,7 @@ render.MapShadows = {
     shader.enable();
 
     if (this.showBackfaces) {
-      gl.disable(gl.CULL_FACE);
+      GL.disable(GL.CULL_FACE);
     }
 
     shader.setUniforms([
@@ -62,17 +62,17 @@ render.MapShadows = {
 
     shader.setUniformMatrices([
       ['uModelMatrix', '4fv', modelMatrix.data],
-      ['uMatrix',      '4fv', glx.Matrix.multiply(modelMatrix, render.viewProjMatrix)],
-      ['uSunMatrix',   '4fv', glx.Matrix.multiply(modelMatrix, Sun.viewProjMatrix)]
+      ['uMatrix',      '4fv', GLX.Matrix.multiply(modelMatrix, render.viewProjMatrix)],
+      ['uSunMatrix',   '4fv', GLX.Matrix.multiply(modelMatrix, Sun.viewProjMatrix)]
     ]);
 
     shader.bindBuffer(item.vertexBuffer, 'aPosition');
     shader.bindBuffer(item.normalBuffer, 'aNormal');
 
-    gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
 
     if (this.showBackfaces) {
-      gl.enable(gl.CULL_FACE);
+      GL.enable(GL.CULL_FACE);
     }
 
     shader.disable();

@@ -3,10 +3,13 @@
 _scratch
 node_modules
 test/data
+dist/OSMBuildings/*
 dist/OSMBuildings*
 
 src/Shaders.min.js
 lib/GLX.debug.js
+
+build/temp
 
 # backup files
 *~

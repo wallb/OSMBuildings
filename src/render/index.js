@@ -10,28 +10,20 @@ var render = {
   start: function() {
     // disable effects if they rely on WebGL extensions
     // that the current hardware does not support
-    if (!gl.depthTextureExtension) {
+    if (!GL.depthTextureExtension) {
       console.log('[WARN] effects "shadows" and "outlines" disabled in OSMBuildings, because your GPU does not support WEBGL_depth_texture');
       //both effects rely on depth textures
       delete render.effects.shadows;
       delete render.effects.outlines;
     }
 
-    this.viewMatrix = new glx.Matrix();
-    this.projMatrix = new glx.Matrix();
-    this.viewProjMatrix = new glx.Matrix();
-    this.viewDirOnMap = [0.0, -1.0];
-
     MAP.on('change', this._onChange = this.onChange.bind(this));
-    this.onChange();
-
     MAP.on('resize', this._onResize = this.onResize.bind(this));
-    this.onResize();  //initialize projection matrix
-    this.onChange();  //initialize view matrix
+    this.onResize();  //initialize view and projection matrix, fog distance, etc.
 
-    gl.cullFace(gl.BACK);
-    gl.enable(gl.CULL_FACE);
-    gl.enable(gl.DEPTH_TEST);
+    GL.cullFace(GL.BACK);
+    GL.enable(GL.CULL_FACE);
+    GL.enable(GL.DEPTH_TEST);
 
     render.Picking.init(); // renders only on demand
     render.sky = new render.SkyWall();
@@ -71,8 +63,8 @@ var render = {
     requestAnimationFrame( this.renderFrame.bind(this));
 
     this.onChange();    
-    gl.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 0.0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    GL.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 0.0);
+    GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
     if (MAP.zoom < APP.minZoom || MAP.zoom > APP.maxZoom) {
       return;
@@ -102,17 +94,17 @@ var render = {
           render.blurredOutlineMap.render(render.OutlineMap.framebuffer.renderTexture, viewSize);
       }
 
-      gl.enable(gl.BLEND);
+      GL.enable(GL.BLEND);
       if (render.effects.outlines) {
-        gl.blendFuncSeparate(gl.ZERO, gl.SRC_COLOR, gl.ZERO, gl.ONE); 
+        GL.blendFuncSeparate(GL.ZERO, GL.SRC_COLOR, GL.ZERO, GL.ONE);
         render.Overlay.render(render.blurredOutlineMap.framebuffer.renderTexture, viewSize);
       }
 
-      gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.DST_ALPHA, gl.ONE, gl.ONE); 
-      gl.disable(gl.DEPTH_TEST);      
+      GL.blendFuncSeparate(GL.ONE_MINUS_DST_ALPHA, GL.DST_ALPHA, GL.ONE, GL.ONE);
+      GL.disable(GL.DEPTH_TEST);
       render.sky.render();
-      gl.disable(gl.BLEND);
-      gl.enable(gl.DEPTH_TEST);
+      GL.disable(GL.BLEND);
+      GL.enable(GL.DEPTH_TEST);
     } else {
       render.cameraGBuffer.render(this.viewMatrix, this.projMatrix, viewSize, true);
       render.sunGBuffer.render(Sun.viewMatrix, Sun.projMatrix);
@@ -131,13 +123,13 @@ var render = {
         render.blurredOutlineMap.render(render.OutlineMap.framebuffer.renderTexture, viewSize);
       }
 
-      gl.enable(gl.BLEND);
+      GL.enable(GL.BLEND);
       {
         // multiply DEST_COLOR by SRC_COLOR, keep SRC alpha
         // this aplies the shadow and SSAO effects (which selectively darken the scene)
         // while keeping the alpha channel (that corresponds to how much the
         // geometry should be blurred into the background in the next step) intact
-        gl.blendFuncSeparate(gl.ZERO, gl.SRC_COLOR, gl.ZERO, gl.ONE); 
+        GL.blendFuncSeparate(GL.ZERO, GL.SRC_COLOR, GL.ZERO, GL.ONE);
         if (render.effects.outlines) {
           render.Overlay.render(render.blurredOutlineMap.framebuffer.renderTexture, viewSize);
         }
@@ -148,22 +140,22 @@ var render = {
         // linear interpolation between the colors of the current framebuffer 
         // ( =building geometries) and of the sky. The interpolation factor
         // is the geometry alpha value, which contains the 'foggyness' of each pixel
-        // the alpha interpolation functions is set to gl.ONE for both operands
+        // the alpha interpolation functions is set to GL.ONE for both operands
         // to ensure that the alpha channel will become 1.0 for each pixel after this
         // operation, and thus the whole canvas is not rendered partially transparently
         // over its background.
-        gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.DST_ALPHA, gl.ONE, gl.ONE);
-        gl.disable(gl.DEPTH_TEST);
+        GL.blendFuncSeparate(GL.ONE_MINUS_DST_ALPHA, GL.DST_ALPHA, GL.ONE, GL.ONE);
+        GL.disable(GL.DEPTH_TEST);
         render.sky.render();
-        gl.enable(gl.DEPTH_TEST);
+        GL.enable(GL.DEPTH_TEST);
       }
-      gl.disable(gl.BLEND);
+      GL.disable(GL.BLEND);
 
       //render.HudRect.render( render.sunGBuffer.getFogNormalTexture(), config );
     }
 
     if (this.screenshotCallback) {
-      this.screenshotCallback(gl.canvas.toDataURL());
+      this.screenshotCallback(GL.canvas.toDataURL());
       this.screenshotCallback = null;
     }  
   },
@@ -171,25 +163,7 @@ var render = {
   stop: function() {
     clearInterval(this.loop);
   },
-
-  updateFogDistance: function() {
-    var inverse = glx.Matrix.invert(this.viewProjMatrix.data);
-    
-    //need to store this as a reference point to determine fog distance
-    this.lowerLeftOnMap = getIntersectionWithXYPlane(-1, -1, inverse);
-    if (this.lowerLeftOnMap === undefined) {
-      return;
-    }
-
-    var lowerLeftDistanceToCenter = len2(this.lowerLeftOnMap);
-
-    /* fogDistance: closest distance at which the fog affects the geometry */
-    this.fogDistance = Math.max(3000, lowerLeftDistanceToCenter);
-    /* fogBlurDistance: closest distance *beyond* fogDistance at which everything is
-     *                  completely enclosed in fog. */
-    this.fogBlurDistance = 500;
-  },
-
+  
   onChange: function() {
     var 
       scale = 1.38*Math.pow(2, MAP.zoom-17),
@@ -198,16 +172,15 @@ var render = {
       refHeight = 1024,
       refVFOV = 45;
 
-    glx.context.viewport(0, 0, width, height);
+    GL.viewport(0, 0, width, height);
 
-    this.viewMatrix = new glx.Matrix()
+    this.viewMatrix = new GLX.Matrix()
       .rotateZ(MAP.rotation)
       .rotateX(MAP.tilt)
       .translate(0, 0, -1220/scale); //move away to simulate zoom; -1220 scales MAP tiles to ~256px
 
     this.viewDirOnMap = [ Math.sin(MAP.rotation / 180* Math.PI),
                          -Math.cos(MAP.rotation / 180* Math.PI)];
-
 
     // OSMBuildings' perspective camera is ... special: The reference point for
     // camera movement, rotation and zoom is at the screen center (as usual). 
@@ -224,19 +197,32 @@ var render = {
     //    internal reasons).
     // 3. shift the geometry back down half a screen now *in screen coordinates*
 
-    this.projMatrix = new glx.Matrix()
+    this.projMatrix = new GLX.Matrix()
       .translate(0, -height/(2.0*scale), 0) // 0, MAP y offset to neutralize camera y offset, 
       .scale(1, -1, 1) // flip Y
-      .multiply(new glx.Matrix.Perspective(refVFOV * height / refHeight, width/height, 1, 7500))
+      .multiply(new GLX.Matrix.Perspective(refVFOV * height / refHeight, width/height, 1, 7500))
       .translate(0, -1, 0); // camera y offset
 
-    this.viewProjMatrix = new glx.Matrix(glx.Matrix.multiply(this.viewMatrix, this.projMatrix));
-    this.updateFogDistance();
+    this.viewProjMatrix = new GLX.Matrix(GLX.Matrix.multiply(this.viewMatrix, this.projMatrix));
+
+    //need to store this as a reference point to determine fog distance
+    this.lowerLeftOnMap = getIntersectionWithXYPlane(-1, -1, GLX.Matrix.invert(this.viewProjMatrix.data));
+    if (this.lowerLeftOnMap === undefined) {
+      return;
+    }
+
+    var lowerLeftDistanceToCenter = len2(this.lowerLeftOnMap);
+
+    /* fogDistance: closest distance at which the fog affects the geometry */
+    this.fogDistance = Math.max(3000, lowerLeftDistanceToCenter);
+    /* fogBlurDistance: closest distance *beyond* fogDistance at which everything is
+     *                  completely enclosed in fog. */
+    this.fogBlurDistance = 500;
   },
 
   onResize: function() {
-    glx.context.canvas.width  = MAP.width;
-    glx.context.canvas.height = MAP.height;
+    GL.canvas.width  = MAP.width;
+    GL.canvas.height = MAP.height;
     this.onChange();
   },
 

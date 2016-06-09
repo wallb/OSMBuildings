@@ -3,7 +3,7 @@ render.Buildings = {
 
   init: function() {
   
-    this.shaderNoShadows = new glx.Shader({
+    this.shaderNoShadows = new GLX.Shader({
         vertexShader: Shaders.buildings.vertex,
         fragmentShader: Shaders.buildings.fragment,
         shaderName: 'building shader',
@@ -24,7 +24,7 @@ render.Buildings = {
           'uWallTexIndex'
         ]
     });
-    this.shaderShadows = new glx.Shader({
+    this.shaderShadows = new GLX.Shader({
         vertexShader: Shaders['buildings.shadows'].vertex,
         fragmentShader: Shaders['buildings.shadows'].fragment,
         shaderName: 'quality building shader',
@@ -48,7 +48,7 @@ render.Buildings = {
         ]
     });
     
-    this.wallTexture = new glx.texture.Image();
+    this.wallTexture = new GLX.texture.Image();
     this.wallTexture.color( [1,1,1]);
     this.wallTexture.load( BUILDING_TEXTURE);
   },
@@ -59,7 +59,7 @@ render.Buildings = {
     shader.enable();
 
     if (this.showBackfaces) {
-      gl.disable(gl.CULL_FACE);
+      GL.disable(GL.CULL_FACE);
     }
 
     if (!this.highlightID) {
@@ -79,7 +79,7 @@ render.Buildings = {
     ]);
 
     if (!render.effects.shadows) {
-      shader.setUniformMatrix('uNormalTransform', '3fv', glx.Matrix.identity3().data);
+      shader.setUniformMatrix('uNormalTransform', '3fv', GLX.Matrix.identity3().data);
     }
 
     shader.bindTexture('uWallTexIndex', 0, this.wallTexture);
@@ -105,11 +105,11 @@ render.Buildings = {
 
       shader.setUniformMatrices([
         ['uModelMatrix', '4fv', modelMatrix.data],
-        ['uMatrix',      '4fv', glx.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
+        ['uMatrix',      '4fv', GLX.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
       ]);
       
       if (render.effects.shadows) {
-        shader.setUniformMatrix('uSunMatrix', '4fv', glx.Matrix.multiply(modelMatrix, Sun.viewProjMatrix));
+        shader.setUniformMatrix('uSunMatrix', '4fv', GLX.Matrix.multiply(modelMatrix, Sun.viewProjMatrix));
       }
 
       shader.bindBuffer(item.vertexBuffer,   'aPosition');
@@ -119,11 +119,11 @@ render.Buildings = {
       shader.bindBuffer(item.filterBuffer,   'aFilter');
       shader.bindBuffer(item.idBuffer,       'aID');
 
-      gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+      GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
     }
 
     if (this.showBackfaces) {
-      gl.enable(gl.CULL_FACE);
+      GL.enable(GL.CULL_FACE);
     }
 
     shader.disable();

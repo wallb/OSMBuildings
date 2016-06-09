@@ -59,12 +59,10 @@
   </style>
   <link rel="stylesheet" href="../dist/OSMBuildings/OSMBuildings.css">
   <script src="loader.js"></script>
-  <script src="../src/engines/Basemap/index.js"></script>
-  <script src="../src/engines/Basemap/Pointer.js"></script>
-  <script src="../src/engines/Basemap/Layers.js"></script>
 </head>
 
 <body>
+<!--<div id="map" style="position:absolute;top:100px"></div>-->
 <div id="map"></div>
 
 <div id="label" style="width:10px;height:10px;position:absolute;z-Index:1000;border:3px solid red;"></div>
@@ -132,7 +130,7 @@
     {
       minZoom: 14.5,
       maxZoom: 20,
-      attribution: '© Data <a href="http://openstreetmap.org/copyright/">OpenStreetMap</a> · © Map <a href="http://mapbox.com">MapBox</a>'
+      attribution: '© Data <a href="http://openstreetmap.org/copyright/">OpenStreetMap</a> · © Map <a href="http://mapbox.com">Mapbox</a>'
     }
   );
 
@@ -165,22 +163,22 @@
   
   var colorLandmarks = function(id, properties) {
     var landmarkIDs = {
-      3074565: true,  // Rotes Rathaus
-      313675136: true, // Rotes Rathaus
-      2167988: true,  // Berliner Dom
-      37449517: true, // Bundestag
-      2326380: true,  // Kanzleramt
-      4065110: true,  // Fernsehturm components
-      304987177: true,
-      19046101: true,
-      96880470: true,
-      326772329: true,
-      230818931: true,	
-      304987174: true,
-      304987172: true,
-      304987176: true,
-      96880477: true,
-      304987173: true
+      "r3074565": true,  // Rotes Rathaus
+      "w313675136": true, // Rotes Rathaus
+      "r2167988": true,  // Berliner Dom
+      "w37449517": true, // Bundestag
+      "r2326380": true,  // Kanzleramt
+      "r4065110": true,  // Fernsehturm components
+      "w304987177": true,
+      "w19046101": true,
+      "w96880470": true,
+      "w326772329": true,
+      "w230818931": true,
+      "w304987174": true,
+      "w304987172": true,
+      "w304987176": true,
+      "w96880477": true,
+      "w304987173": true
     };
 
     properties.color = (id in landmarkIDs) ? "#CC4444" : "#DDDDDD";
@@ -227,7 +225,7 @@
 //  });
 
   map.on('pointermove', function(e) {
-    var id = osmb.getTarget(e.x, e.y, function(id) {
+    osmb.getTarget(e.detail.x, e.detail.y, function(id) {
       if (id) {
         document.body.style.cursor = 'pointer';
         osmb.highlight(id, '#f08000');
@@ -239,12 +237,12 @@
   });
 
 //  map.on('pointermove', function(e) {
-//    obj.position = osmb.unproject(e.x, e.y);
+//    obj.position = osmb.unproject(e.detail.x, e.detail.y);
 //  });
 //
 
 //  map.on('pointerdown', function(e) {
-//    var id = osmb.getTarget(e.x, e.y, function(id) {
+//    var id = osmb.getTarget(e.detail.x, e.detail.y, function(id) {
 //      console.log(id);
 //    });
 //  });

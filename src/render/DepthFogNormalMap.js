@@ -9,7 +9,7 @@
 */
 
 render.DepthFogNormalMap = function() {
-  this.shader = new glx.Shader({
+  this.shader = new GLX.Shader({
     vertexShader: Shaders.fogNormal.vertex,
     fragmentShader: Shaders.fogNormal.fragment,
     shaderName: 'fog/normal shader',
@@ -17,7 +17,7 @@ render.DepthFogNormalMap = function() {
     uniforms: ['uMatrix', 'uModelMatrix', 'uNormalMatrix', 'uTime', 'uFogDistance', 'uFogBlurDistance', 'uViewDirOnMap', 'uLowerEdgePoint']
   });
   
-  this.framebuffer = new glx.Framebuffer(128, 128, /*depthTexture=*/true); //dummy sizes, will be resized dynamically
+  this.framebuffer = new GLX.Framebuffer(128, 128, /*depthTexture=*/true); //dummy sizes, will be resized dynamically
 
   this.mapPlane = new mesh.MapPlane();
 };
@@ -36,17 +36,17 @@ render.DepthFogNormalMap.prototype.render = function(viewMatrix, projMatrix, fra
   var
     shader = this.shader,
     framebuffer = this.framebuffer,
-    viewProjMatrix = new glx.Matrix(glx.Matrix.multiply(viewMatrix,projMatrix));
+    viewProjMatrix = new GLX.Matrix(GLX.Matrix.multiply(viewMatrix,projMatrix));
 
   framebufferSize = framebufferSize || this.framebufferSize;
   framebuffer.setSize( framebufferSize[0], framebufferSize[1] );
     
   shader.enable();
   framebuffer.enable();
-  gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+  GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
 
-  gl.clearColor(0.0, 0.0, 0.0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  GL.clearColor(0.0, 0.0, 0.0, 1);
+  GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
   var item, modelMatrix;
 
@@ -75,22 +75,22 @@ render.DepthFogNormalMap.prototype.render = function(viewMatrix, projMatrix, fra
     ]);
 
     shader.setUniformMatrices([
-      ['uMatrix',       '4fv', glx.Matrix.multiply(modelMatrix, viewProjMatrix)],
+      ['uMatrix',       '4fv', GLX.Matrix.multiply(modelMatrix, viewProjMatrix)],
       ['uModelMatrix',  '4fv', modelMatrix.data],
-      ['uNormalMatrix', '3fv', glx.Matrix.transpose3(glx.Matrix.invert3(glx.Matrix.multiply(modelMatrix, viewMatrix)))]
+      ['uNormalMatrix', '3fv', GLX.Matrix.transpose3(GLX.Matrix.invert3(GLX.Matrix.multiply(modelMatrix, viewMatrix)))]
     ]);
     
     shader.bindBuffer(item.vertexBuffer, 'aPosition');
     shader.bindBuffer(item.normalBuffer, 'aNormal');
     shader.bindBuffer(item.filterBuffer, 'aFilter');
 
-    gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
   }
 
   shader.disable();
   framebuffer.disable();
 
-  gl.viewport(0, 0, MAP.width, MAP.height);
+  GL.viewport(0, 0, MAP.width, MAP.height);
 };
 
 render.DepthFogNormalMap.prototype.destroy = function() {};

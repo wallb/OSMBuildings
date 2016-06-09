@@ -6,48 +6,44 @@ module.exports = function(grunt) {
   grunt.initConfig({
     pkg: grunt.file.readJSON('package.json'),
 
+    cfg: grunt.file.readJSON('config.json'),
+
     concat: {
       glx: {
         options: {
           separator: "\n",
-          banner: "(function(global) {",
-          footer: "}(this));",
+          banner: "var GLX = (function() {",
+          footer: "\nreturn GLX;\n}());\n",
           sourceMap: true
         },
-        src: [
-          "src/glx/index.js",
-          "src/glx/prefix.js",
-          "src/glx/util.js",
-          "src/glx/Buffer.js",
-          "src/glx/Framebuffer.js",
-          "src/glx/Shader.js",
-          "src/glx/Matrix.js",
-          "src/glx/Texture.js",
-          "src/glx/texture/index.js",
-          "src/glx/texture/Image.js",
-          "src/glx/texture/Data.js",
-          "src/glx/mesh/index.js",
-          "src/glx/mesh/Triangle.js",
-          "src/glx/mesh/Plane.js",
-          "src/glx/mesh/Cube.js",
-          "src/glx/suffix.js"
-        ],
-        dest: 'lib/GLX.debug.js'
+        src: '<%=cfg.glx%>',
+        dest: 'build/temp/GLX.debug.js'
       },
 
-      'osmb-basemap': {
+      'glmap': {
         options: {
           separator: "\n",
-          banner: "(function(global) {",
-          footer: "}(this));",
+          banner: "var GLMap = (function() {\n",
+          footer: "\nreturn GLMap;\n}());\nwindow.GLMap = GLMap;\n",
+          sourceMap: true
+        },
+        src: '<%=cfg.glmap%>',
+        dest: 'build/temp/GLMap.debug.js'
+      },
+
+      'osmb-with-glmap': {
+        options: {
+          separator: "\n",
+          banner: "(function() {",
+          footer: "}());",
           sourceMap: true
         },
         src: [
-          'src/engines/Basemap/index.js',
-          'src/engines/Basemap/Pointer.js',
-          'src/engines/Basemap/Layers.js',
-          grunt.file.readJSON('config.json').lib,
-          grunt.file.readJSON('config.json').src
+          '<%=cfg.modules%>',
+          'build/temp/Shaders.js',
+          'build/temp/GLX.debug.js',
+          'build/temp/GLMap.debug.js',
+          '<%=cfg.src%>'
         ],
         dest: 'dist/OSMBuildings/<%=pkg.name%>.debug.js'
       }
@@ -59,13 +55,13 @@ module.exports = function(grunt) {
         dest: 'dist/OSMBuildings/skydome.jpg'
       },
       'css': {
-        src: 'src/engines/Basemap/style.css',
+        src: 'src/engines/GLMap/style.css',
         dest: 'dist/OSMBuildings/<%=pkg.name%>.css'
       }
     },
 
     uglify: {
-      'osmb-basemap': {
+      dist: {
         options: {
           sourceMap: true
         },
@@ -77,8 +73,8 @@ module.exports = function(grunt) {
     shaders: {
       dist: {
         src: 'src/shader',
-        dest: 'src/Shaders.min.js',
-        names: grunt.file.readJSON('config.json').shaders
+        dest: 'build/temp/Shaders.js',
+        names: '<%=cfg.shaders%>'
       }
     },
 
@@ -91,15 +87,21 @@ module.exports = function(grunt) {
       }
     },
 
-    clean: {
-      dist: ['./dist/OSMBuildings/<%=pkg.name%>.pack.js']
-    },
-
     jshint: {
-      options: {
-         globals: {}
-       },
-      all: grunt.file.readJSON('config.json').src
+      glx: {
+        options: {},
+        src: ['build/temp/GLX.debug.js']
+      },
+
+      glmap: {
+        options: {},
+        src: ['build/temp/GLMap.debug.js']
+      },
+
+      osmb: {
+        options: {},
+        src: '<%=cfg.src%>'
+      }
     },
 
     compress: {
@@ -112,22 +114,6 @@ module.exports = function(grunt) {
           { expand: true, cwd: 'dist/', src: ['<%=pkg.name%>/*', 'index.html'] }
         ]
       }
-    },
-
-    // just testing, whether wepack *would* work
-    webpack: {
-      test: {
-        entry: './dist/OSMBuildings/<%=pkg.name%>.debug.js',
-        output: {
-            path: './dist/OSMBuildings',
-            filename: '<%=pkg.name%>.pack.js',
-        },
-        stats: false, // the stats output
-        progress: false, // show progress
-        failOnError: true, // don't report error to grunt if webpack find errors
-        watch: false,
-        keepalive: true // don't finish the grunt task
-      }
     }
   });
 
@@ -136,23 +122,29 @@ module.exports = function(grunt) {
   grunt.loadNpmTasks('grunt-contrib-uglify');
   grunt.loadNpmTasks('grunt-contrib-jshint');
   grunt.loadNpmTasks('grunt-contrib-compress');
-  grunt.loadNpmTasks('grunt-webpack');
   grunt.loadNpmTasks('grunt-jsdoc');
 
-  grunt.registerMultiTask('version', 'Set version number', function() {
-    var config = this.data;
 
-    var content = '' + fs.readFileSync(config.src);
-
-    for (var tag in config.mapping) {
-      content = content.replace(tag, config.mapping[tag]);
+  function safeMkdir(dir) {
+    try {
+      fs.readdirSync(dir);
+    } catch (ex) {
+      fs.mkdirSync(dir);
+      grunt.log.writeln('directory created: ' + dir);
     }
+  }
 
-    fs.writeFileSync(config.src, content);
-  });
+  function setup() {
+    safeMkdir('dist');
+    safeMkdir('dist/OSMBuildings');
+    safeMkdir('build');
+    safeMkdir('build/temp');
+  }
 
   grunt.registerMultiTask('shaders', 'Build shaders', function() {
-    // grunt.log.writeln(JSON.stringify(this.data));
+    setup();
+
+    //grunt.log.writeln(JSON.stringify(this.data));
     var config = this.data;
 
     var src, name, Shaders = {};
@@ -170,26 +162,61 @@ module.exports = function(grunt) {
     fs.writeFileSync(config.dest, 'var Shaders = '+ JSON.stringify(Shaders) +';\n');
   });
 
-  grunt.registerTask('default', 'Build shaders', function() {
-    grunt.log.writeln('\033[1;36m'+ grunt.template.date(new Date(), 'yyyy-mm-dd HH:MM:ss') +'\033[0m');
+  grunt.registerTask('glx', 'GL abstraction layer for OSM Buildings', function() {
+    setup();
+    grunt.task.run('concat:glx');
+    grunt.task.run('jshint:glx');
+  });
+
+  grunt.registerTask('glmap', 'base map for standalone OSM Buildings', function() {
+    setup();
+    grunt.task.run('concat:glmap');
+    grunt.task.run('jshint:glmap');
+  });
+
+  grunt.registerMultiTask('version', 'set version number', function() {
+    setup();
+    //grunt.log.writeln(JSON.stringify(this.data));
+    var config = this.data;
+
+    var content = '' + fs.readFileSync(config.src);
+
+    for (var tag in config.mapping) {
+      content = content.replace(tag, config.mapping[tag]);
+    }
+
+    fs.writeFileSync(config.src, content);
+  });
+
+  grunt.registerTask('osmb', 'core OSM Buildings task', function() {
+    setup();
+    grunt.task.run('shaders');
+    grunt.task.run('glx');
+    grunt.task.run('glmap');
+
+    grunt.task.run('jshint:osmb');
+
+    grunt.task.run('concat:osmb-with-glmap');
+
+    grunt.task.run('version');
+
+    grunt.task.run('uglify');
+  });
+
+  grunt.registerTask('default', 'dev build', function() {
+    setup();
     grunt.task.run('shaders');
   });
 
   grunt.registerTask('release', 'Release', function() {
+    setup();
     grunt.log.writeln('\033[1;36m'+ grunt.template.date(new Date(), 'yyyy-mm-dd HH:MM:ss') +'\033[0m');
 
-    grunt.task.run('jshint');
-
-    grunt.task.run('concat:glx');
-    grunt.task.run('shaders');
-    grunt.task.run('concat:osmb-basemap');
-    grunt.task.run('version');
-    grunt.task.run('uglify:osmb-basemap');
+    grunt.task.run('osmb');
 
     grunt.task.run('copy:assets');
     grunt.task.run('copy:css');
 
-    grunt.task.run('compress');
-    grunt.task.run('webpack');
+    grunt.task.run('compress'); // zip a release bundle
   });
 };

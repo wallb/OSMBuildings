@@ -1,11 +1,40 @@
 {
-  "shaders": ["picking", "buildings", "buildings.shadows", "flatColor", "skywall", "basemap", "texture", "fogNormal", "ambientFromDepth", "blur", "basemap.shadows", "outlineMap"],
+  "shaders": [
+    "picking",
+    "buildings",
+    "buildings.shadows",
+    "flatColor",
+    "skywall",
+    "basemap",
+    "texture",
+    "fogNormal",
+    "ambientFromDepth",
+    "blur",
+    "basemap.shadows",
+    "outlineMap"
+  ],
 
-  "lib": [
+  "modules": [
     "node_modules/Triangulate/dist/Triangulate.js",
     "node_modules/Color/dist/Color.debug.js",
-    "lib/GLX.debug.js",
     "node_modules/suncalc/suncalc.js"
+  ],
+
+  "glx": [
+    "src/glx/index.js",
+    "src/glx/util.js",
+    "src/glx/Buffer.js",
+    "src/glx/Framebuffer.js",
+    "src/glx/Shader.js",
+    "src/glx/Matrix.js",
+    "src/glx/texture/index.js",
+    "src/glx/texture/Image.js",
+    "src/glx/texture/Data.js"
+  ],
+
+  "glmap": [
+    "src/engines/GLMap/index.js",
+    "src/engines/GLMap/Events.js"
   ],
 
   "src": [
@@ -17,7 +46,6 @@
     "src/variables.js",
     "src/Request.js",
     "src/util.js",
-    "src/Shaders.min.js",
 
     "src/Grid.js",
     "src/Filter.js",

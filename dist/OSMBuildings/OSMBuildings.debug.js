@@ -1,775 +1,4 @@
-(function(global) {
-var document = global.document;
-
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(value, min));
-}
-
-/**
- * OSMBuildings basemap
- * @constructor
- * @param {String} container - The id of the html element to display the map in
- * @param {Object} options
- * @param {Integer} [options.minZoom=10] - Minimum allowed zoom
- * @param {Integer} [options.maxZoom=20] - Maxiumum allowed zoom
- * @param {Object} [options.bounds] - A bounding box to restrict the map to
- * @param {Boolean} [options.state=false] - Store the map state in the URL
- * @param {Boolean} [options.disabled=false] - Disable user input
- * @param {String} [options.attribution] - An attribution string
- * @param {Float} [options.zoom=minZoom] - Initial zoom
- * @param {Float} [options.rotation=0] - Initial rotation
- * @param {Float} [options.tilt=0] - Initial tilt
- * @param {Object} [options.position] - Initial position
- * @param {Float} [options.position.latitude=52.520000]
- * @param {Float} [options.position.latitude=13.410000]
- */
-var Basemap = function(container, options) {
-  this.container = typeof container === 'string' ? document.getElementById(container) : container;
-  options = options || {};
-
-  this.container.classList.add('osmb-container');
-  this.width = this.container.offsetWidth;
-  this.height = this.container.offsetHeight;
-
-  this.minZoom = parseFloat(options.minZoom) || 10;
-  this.maxZoom = parseFloat(options.maxZoom) || 20;
-
-  if (this.maxZoom < this.minZoom) {
-    this.maxZoom = this.minZoom;
-  }
-
-  this.bounds = options.bounds;
-
-  this.position = {};
-  this.zoom = 0;
-
-  this.listeners = {};
-
-  this.initState(options);
-
-  if (options.state) {
-    this.persistState();
-    this.on('change', function() {
-      this.persistState();
-    }.bind(this));
-  }
-
-  this.pointer = new Pointer(this, this.container);
-  this.layers  = new Layers(this);
-
-  if (options.disabled) {
-    this.setDisabled(true);
-  }
-
-  this.attribution = options.attribution;
-  this.attributionDiv = document.createElement('DIV');
-  this.attributionDiv.className = 'osmb-attribution';
-  this.container.appendChild(this.attributionDiv);
-  this.updateAttribution();
-};
-
-Basemap.TILE_SIZE = 256;
-
-Basemap.prototype = {
-
-  updateAttribution: function() {
-    var attribution = this.layers.getAttribution();
-    if (this.attribution) {
-      attribution.unshift(this.attribution);
-    }
-    this.attributionDiv.innerHTML = attribution.join(' · ');
-  },
-
-  initState: function(options) {
-    var
-      query = location.search,
-      state = {};
-    if (query) {
-      query.substring(1).replace(/(?:^|&)([^&=]*)=?([^&]*)/g, function($0, $1, $2) {
-        if ($1) {
-          state[$1] = $2;
-        }
-      });
-    }
-
-    var position;
-    if (state.lat !== undefined && state.lon !== undefined) {
-      position = { latitude:parseFloat(state.lat), longitude:parseFloat(state.lon) };
-    }
-    if (!position && state.latitude !== undefined && state.longitude !== undefined) {
-      position = { latitude:state.latitude, longitude:state.longitude };
-    }
-
-    var zoom     = (state.zoom     !== undefined) ? state.zoom     : options.zoom;
-    var rotation = (state.rotation !== undefined) ? state.rotation : options.rotation;
-    var tilt     = (state.tilt     !== undefined) ? state.tilt     : options.tilt;
-
-    this.setPosition(position || options.position || { latitude:52.520000, longitude:13.410000 });
-    this.setZoom(zoom || this.minZoom);
-    this.setRotation(rotation || 0);
-    this.setTilt(tilt || 0);
-  },
-
-  persistState: function() {
-    if (!history.replaceState || this.stateDebounce) {
-      return;
-    }
-
-    this.stateDebounce = setTimeout(function() {
-      this.stateDebounce = null;
-      var params = [];
-      params.push('lat=' + this.position.latitude.toFixed(6));
-      params.push('lon=' + this.position.longitude.toFixed(6));
-      params.push('zoom=' + this.zoom.toFixed(1));
-      params.push('tilt=' + this.tilt.toFixed(1));
-      params.push('rotation=' + this.rotation.toFixed(1));
-      history.replaceState({}, '', '?'+ params.join('&'));
-    }.bind(this), 1000);
-  },
-
-  // TODO: switch to native events
-  emit: function(type, payload) {
-    if (!this.listeners[type]) {
-      return;
-    }
-
-    var listeners = this.listeners[type];
-
-    requestAnimationFrame(function() {
-      for (var i = 0, il = listeners.length; i < il; i++) {
-        listeners[i](payload);
-      }
-    });
-  },
-
-  //***************************************************************************
-
-  // TODO: switch to native events
-  on: function(type, fn) {
-    if (!this.listeners[type]) {
-      this.listeners[type] = [];
-    }
-    this.listeners[type].push(fn);
-    return this;
-  },
-
-  // TODO: switch to native events
-  off: function(type, fn) {
-    if (!this.listeners[type]) {
-      return;
-    }
-
-    this.listeners[type] = this.listeners[type].filter(function(listener) {
-      return (listener !== fn);
-    });
-  },
-
-  setDisabled: function(flag) {
-    this.pointer.disabled = !!flag;
-    return this;
-  },
-
-  isDisabled: function() {
-    return !!this.pointer.disabled;
-  },
-
-  /**
-   * Returns the geographical bounds of the current view.
-   * Notes:
-   * - Since the bounds are always axis-aligned they will contain areas that are
-   *   not currently visible if the current view is not also axis-aligned.
-   * - The bounds only contain the map area that OSMBuildings considers for rendering.
-   *   OSMBuildings has a rendering distance of about 3.5km, so the bounds will
-   *   never extend beyond that, even if the horizon is visible (in which case the
-   *   bounds would mathematically be infinite).
-   * - The bounds only consider ground level. For example, buildings whose top 
-   *   is seen at the lower edge of the screen, but whose footprint is outside 
-   *   of the current view below the lower edge do not contribute to the bounds.
-   *   so their top may be visible and they may still be out of bounds.
-   */
-  getBounds: function() {
-    var viewQuad = render.getViewQuad(), res = [];
-    for (var i in viewQuad) {
-      res[i] = getPositionFromLocal(viewQuad[i]);
-    }
-    return res;
-  },
-
-  /**
-   * Sets the zoom level
-   * @param {Float} zoom - The new zoom level
-   * @param {Object} e - **Not currently used**
-   * @fires Basemap#zoom
-   * @fires Basemap#change
-   */
-  setZoom: function(zoom, e) {
-    zoom = clamp(parseFloat(zoom), this.minZoom, this.maxZoom);
-
-    if (this.zoom !== zoom) {
-      this.zoom = zoom;
-
-      /* if a screen position was given for which the geographic position displayed
-       * should not change under the zoom */
-      if (e) {
-        //FIXME: add code; this needs to take the current camera (rotation and
-        //       perspective) into account
-        //NOTE:  the old code (comment out below) only works for north-up
-        //       non-perspective views
-        /*
-        var dx = this.container.offsetWidth/2  - e.clientX;
-        var dy = this.container.offsetHeight/2 - e.clientY;
-        this.center.x -= dx;
-        this.center.y -= dy;
-        this.center.x *= ratio;
-        this.center.y *= ratio;
-        this.center.x += dx;
-        this.center.y += dy;*/
-      }
-      /**
-       * Fired when the basemap is zoomed (in either direction)
-       * @event Basemap#zoom
-       */
-      this.emit('zoom', { zoom: zoom });
-      
-      /**
-       * Fired when the basemap changes
-       * @event Basemap#change
-       */
-      this.emit('change');
-    }
-    return this;
-  },
-
-  /**
-   * Returns the current zoom level
-   */
-  getZoom: function() {
-    return this.zoom;
-  },
-
-  /**
-   * Sets the map's geographic position
-   * @param {Object} pos - The new position
-   * @param {Float} pos.latitude
-   * @param {Float} pos.longitude
-   * @fires Basemap#change
-   */
-  setPosition: function(pos) {
-    var lat = parseFloat(pos.latitude);
-    var lon = parseFloat(pos.longitude);
-    if (isNaN(lat) || isNaN(lon)) {
-      return;
-    }
-    this.position = { latitude:clamp(lat, -90, 90), longitude:clamp(lon, -180, 180) };
-    this.emit('change');
-    return this;
-  },
-
-  /**
-   * Returns the map's current geographic position
-   */
-  getPosition: function() {
-    return this.position;
-  },
-
-  /**
-   * Sets the map's size
-   * @param {Object} size
-   * @param {Integer} size.width
-   * @param {Integer} size.height
-   * @fires Basemap#resize
-   */
-  setSize: function(size) {
-    if (size.width !== this.width || size.height !== this.height) {
-      this.width = size.width;
-      this.height = size.height;
-      
-      /**
-       * Fired when the map is resized
-       * @event Basemap#resize
-       */
-      this.emit('resize', { width: this.width, height: this.height });
-    }
-    return this;
-  },
-
-  /**
-   * Returns the map's current size
-   */
-  getSize: function() {
-    return { width: this.width, height: this.height };
-  },
-
-  /**
-   * Set's the maps rotation
-   * @param {Float} rotation - The new rotation angle
-   * @fires Basemap#rotate
-   * @fires Basemap#change
-   */
-  setRotation: function(rotation) {
-    rotation = parseFloat(rotation)%360;
-    if (this.rotation !== rotation) {
-      this.rotation = rotation;
-      
-      /**
-       * Fired when the basemap is rotated
-       * @event Basemap#rotate
-       */
-      this.emit('rotate', { rotation: rotation });
-      this.emit('change');
-    }
-    return this;
-  },
-
-  /**
-   * Returns the maps current rotation
-   */
-  getRotation: function() {
-    return this.rotation;
-  },
-
-  /**
-   * Sets the map's tilt
-   * @param {Float} tilt - The new tilt
-   * @fires Basemap#tilt
-   * @fires Basemap#change
-   */
-  setTilt: function(tilt) {
-    tilt = clamp(parseFloat(tilt), 0, 45); // bigger max increases shadow moire on base map
-    if (this.tilt !== tilt) {
-      this.tilt = tilt;
-      
-      /**
-       * Fired when the basemap is tilted
-       * @event Basemap#tilt
-       */
-      this.emit('tilt', { tilt: tilt });
-      this.emit('change');
-    }
-    return this;
-  },
-
-  /**
-   * Returns the map's current tilt
-   */
-  getTilt: function() {
-    return this.tilt;
-  },
-
-  /**
-   * Adds a layer to the map
-   * @param {Object} layer - The layer to add
-   */
-  addLayer: function(layer) {
-    this.layers.add(layer);
-    this.updateAttribution();
-    return this;
-  },
-
-  /**
-   * Removes a layer from the map
-   * @param {Object} layer - The layer to remove
-   */
-  removeLayer: function(layer) {
-    this.layers.remove(layer);
-    this.updateAttribution();
-  },
-
-  /**
-   * Destroys the map
-   */
-  destroy: function() {
-    this.listeners = [];
-    this.pointer.destroy();
-    this.layers.destroy();
-    this.container.innerHTML = '';
-  }
-};
-
-//*****************************************************************************
-
-global.GLMap = Basemap;
-
-
-// TODO: detect pointerleave from container
-// TODO: continue drag/gesture even when off container
-// TODO: allow two finger swipe for tilt
-
-function getEventOffset(e) {
-  if (e.offsetX !== undefined) {
-    return { x:e.offsetX, y:e.offsetY };
-  }
-  var offset = getElementOffset(e.target);
-  return {
-    x: e.clientX - offset.x,
-    y: e.clientY - offset.y
-  }
-}
-
-function getElementOffset(el) {
-  var res = { x:0, y:0 };
-
-  while(el.nodeType === 1) {
-    res.x += el.offsetLeft;
-    res.y += el.offsetTop;
-    el = el.parentNode;
-  }
-  return res;
-}
-
-function cancelEvent(e) {
-  if (e.preventDefault) {
-    e.preventDefault();
-  }
-  //if (e.stopPropagation) {
-  //  e.stopPropagation();
-  //}
-  e.returnValue = false;
-}
-
-var Pointer = function(map, container) {
-  this.map = map;
-
-  if ('ontouchstart' in global) {
-    this._addListener(container, 'touchstart', this.onTouchStart);
-    this._addListener(container, 'touchmove', this.onTouchMove);
-    this._addListener(container, 'touchend', this.onTouchEnd);
-    this._addListener(container, 'gesturechange', this.onGestureChange);
-  } else {
-    this._addListener(container, 'mousedown', this.onMouseDown);
-    this._addListener(container, 'mousemove', this.onMouseMove);
-    this._addListener(container, 'mouseup', this.onMouseUp);
-    this._addListener(container, 'contextmenu', this.onContextMenu);
-    this._addListener(container, 'dblclick', this.onDoubleClick);
-    this._addListener(container, 'mousewheel', this.onMouseWheel);
-    this._addListener(container, 'DOMMouseScroll', this.onMouseWheel);
-  }
-
-  var resizeDebounce;
-  this._addListener(global, 'resize', function() {
-    if (resizeDebounce) {
-      return;
-    }
-    resizeDebounce = setTimeout(function() {
-      resizeDebounce = null;
-      map.setSize({ width:container.offsetWidth, height:container.offsetHeight });
-    }, 250);
-  });
-};
-
-Pointer.prototype = {
-
-  prevX: 0,
-  prevY: 0,
-  startX: 0,
-  startY: 0,
-  startZoom: 0,
-  prevRotation: 0,
-  prevTilt: 0,
-  disabled: false,
-  pointerIsDown: false,
-
-  _listeners: [],
-
-  _addListener: function(target, type, fn) {
-    var boundFn = fn.bind(this);
-    target.addEventListener(type, boundFn, false);
-    this._listeners.push({ target:target, type:type, fn:boundFn });
-  },
-
-  /**
-   * @fires Basemap#doubleclick
-   */
-  onDoubleClick: function(e) {
-    cancelEvent(e);
-    if (!this.disabled) {
-      this.map.setZoom(this.map.zoom + 1, e);
-    }
-    var pos = getEventOffset(e);
-    /**
-     * Fired when the basemap is clicked twice in quick succession
-     * @event Basemap#doubleclick
-     */
-    this.map.emit('doubleclick', { x:pos.x, y:pos.y, button:e.button });
-  },
-
-  /**
-   * @fires Basemap#pointerdown
-   */
-  onMouseDown: function(e) {
-    if (e.button > 1) {
-      return;
-    }
-
-    cancelEvent(e);
-
-    this.startZoom = this.map.zoom;
-    this.prevRotation = this.map.rotation;
-    this.prevTilt = this.map.tilt;
-
-    var pos = getEventOffset(e);
-    this.startX = this.prevX = pos.x;
-    this.startY = this.prevY = pos.y;
-
-    this.pointerIsDown = true;
-
-    /**
-     * Fired when the left mouse button is pressed down on the basemap
-     * @event Basemap#pointerdown
-     */
-    this.map.emit('pointerdown', { x: pos.x, y: pos.y, button: e.button });
-  },
-
-  /**
-   * @fires Basemap#pointermove
-   */
-  onMouseMove: function(e) {
-    var pos = getEventOffset(e);
-
-    if (this.pointerIsDown) {
-      if (e.button === 0 && !e.altKey) {
-        this.moveMap(e);
-      } else {
-        this.rotateMap(e);
-      }
-
-      this.prevX = pos.x;
-      this.prevY = pos.y;
-    }
-
-    /**
-     * Fired when the mouse is moved on the basemap
-     * @event Basemap#pointermove
-     */
-    this.map.emit('pointermove', { x: pos.x, y: pos.y });
-  },
-
-  /**
-   * @fires Basemap#pointerup
-   */
-  onMouseUp: function(e) {
-    // prevents clicks on other page elements
-    if (!this.pointerIsDown) {
-      return;
-    }
-
-    var pos = getEventOffset(e);
-
-    if (e.button === 0 && !e.altKey) {
-      if (Math.abs(pos.x - this.startX)>5 || Math.abs(pos.y - this.startY)>5) {
-        this.moveMap(e);
-      }
-    } else {
-      this.rotateMap(e);
-    }
-
-    this.pointerIsDown = false;
-
-    /**
-     * Fired when the left mouse button is released on the basemap 
-     * @event Basemap#pointerup
-     */
-    this.map.emit('pointerup', { x: pos.x, y: pos.y, button: e.button });
-  },
-
-  onContextMenu: function(e) {
-    e.preventDefault();
-    var pos = getEventOffset(e);
-    this.map.emit('contextmenu', { x: pos.x, y: pos.y });
-    return false;
-  },
-
-  /**
-   * @fires Basemap#mousewheel
-   */
-  onMouseWheel: function(e) {
-    cancelEvent(e);
-    var delta = 0;
-    if (e.wheelDeltaY) {
-      delta = e.wheelDeltaY;
-    } else if (e.wheelDelta) {
-      delta = e.wheelDelta;
-    } else if (e.detail) {
-      delta = -e.detail;
-    }
-
-    if (!this.disabled) {
-      var adjust = 0.2*(delta>0 ? 1 : delta<0 ? -1 : 0);
-      this.map.setZoom(this.map.zoom + adjust, e);
-    }
-
-    /**
-     * Fired when the mouse wheel is pressed on the basemap 
-     * @event Basemap#mousewheel
-     */
-    this.map.emit('mousewheel', { delta: delta });
-  },
-
-  /**
-   * @fires Basemap#move
-   */
-  moveMap: function(e) {
-    if (this.disabled) {
-      return;
-    }
-
-    // FIXME: make movement exact, i.e. make the position that
-    //        appeared at (this.prevX, this.prevY) before appear at
-    //        (e.offsetX, e.offsetY) now.
-    // the constant 0.86 was chosen experimentally for the map movement to be
-    // "pinned" to the cursor movement when the map is shown top-down
-    var scale = 0.86 * Math.pow(2, -this.map.zoom);
-    var lonScale = 1/Math.cos( this.map.position.latitude/ 180 * Math.PI);
-    var pos = getEventOffset(e);
-    var dx = pos.x - this.prevX;
-    var dy = pos.y - this.prevY;
-    var angle = this.map.rotation * Math.PI/180;
-
-    var vRight   = [ Math.cos(angle),             Math.sin(angle)];
-    var vForward = [ Math.cos(angle - Math.PI/2), Math.sin(angle - Math.PI/2)]
-
-    var dir = add2(  mul2scalar(vRight,    dx),
-                     mul2scalar(vForward, -dy));
-
-    var newPosition = {
-      longitude: this.map.position.longitude - dir[0] * scale*lonScale,
-      latitude:  this.map.position.latitude  + dir[1] * scale };
-
-    /**
-     * Fired basemap is moved 
-     * @event Basemap#move
-     */
-    this.map.setPosition(newPosition);
-    this.map.emit('move', newPosition);
-  },
-
-  rotateMap: function(e) {
-    if (this.disabled) {
-      return;
-    }
-    var pos = getEventOffset(e);
-    this.prevRotation += (pos.x - this.prevX)*(360/innerWidth);
-    this.prevTilt -= (pos.y - this.prevY)*(360/innerHeight);
-    this.map.setRotation(this.prevRotation);
-    this.map.setTilt(this.prevTilt);
-  },
-
-  //***************************************************************************
-
-  /**
-   * @fires Basemap#pointerdown
-   */
-  onTouchStart: function(e) {
-    cancelEvent(e);
-
-    this.startZoom = this.map.zoom;
-    this.prevRotation = this.map.rotation;
-    this.prevTilt = this.map.tilt;
-
-    if (e.touches.length) {
-      e = e.touches[0];
-    }
-
-    var pos = getEventOffset(e);
-    this.startX = this.prevX = pos.x;
-    this.startY = this.prevY = pos.y;
-
-    this.map.emit('pointerdown', { x: pos.x, y: pos.y, button: 0 });
-  },
-
-  /**
-   * @fires Basemap#pointermove
-   */
-  onTouchMove: function(e) {
-    if (e.touches.length) {
-      e = e.touches[0];
-    }
-
-    this.moveMap(e);
-
-    var pos = getEventOffset(e);
-    this.prevX = pos.x;
-    this.prevY = pos.y;
-
-    this.map.emit('pointermove', { x: pos.x, y: pos.y });
-  },
-
-  /**
-   * @fires Basemap#pointerup
-   */
-  onTouchEnd: function(e) {
-    if (e.touches.length === 0) {
-      this.map.emit('pointerup', { x: this.prevX, y: this.prevY, button: 0 });
-    } else if (e.touches.length === 1) {
-      // There is one touch currently on the surface => gesture ended. Prepare for continued single touch move
-      var pos = getEventOffset(e.touches[0]);
-      this.prevX = pos.x;
-      this.prevY = pos.y;
-    }
-  },
-
-  /**
-   * @fires Basemap#gesture
-   */
-  onGestureChange: function(e) {
-    cancelEvent(e);
-    if (!this.disabled) {
-      this.map.setZoom(this.startZoom + (e.scale - 1));
-      this.map.setRotation(this.prevRotation - e.rotation);
-  //  this.map.setTilt(prevTilt ...);
-    }
-    /**
-     * Fired when a touch gesture occurs on the basemap
-     * @event Basemap#gesture
-     */
-    this.map.emit('gesture', e.touches);
-  },
-
-  destroy: function() {
-    this.disabled = true;
-    var listener;
-    for (var i = 0; i < this._listeners.length; i++) {
-      listener = this._listeners[i];
-      listener.target.removeEventListener(listener.type, listener.fn, false);
-    }
-    this._listeners = [];
-  }
-};
-
-
-var Layers = function(map) {
-  this.map = map;
-  this.items = [];
-};
-
-Layers.prototype = {
-
-  add: function(layer) {
-    this.items.push(layer);
-  },
-
-  remove: function(layer) {
-    this.items = this.items.filter(function(item) {
-      return (item !== layer);
-    });
-  },
-
-  getAttribution: function() {
-    var attribution = [];
-    for (var i = 0; i < this.items.length; i++) {
-      if (this.items[i].attribution) {
-        attribution.push(this.items[i].attribution);
-      }
-    }
-    return attribution;
-  },
-
-  destroy: function() {
-    this.items = [];
-  }
-};
-
-var Triangulate = (function() {
+(function() {var Triangulate = (function() {
 var w3cColors = {
   aliceblue: '#f0f8ff',
   antiquewhite: '#faebd7',
@@ -2495,1015 +1724,6 @@ return Color;
 
 if (typeof module === 'object') { module.exports = Color; }
 
-(function(global) {
-//var ext = GL.getExtension('WEBGL_lose_context');
-//ext.loseContext();
-
-var GLX = function(container, width, height, highQuality) {
-  var canvas = document.createElement('CANVAS');
-  canvas.style.position = 'absolute';
-  canvas.width = width;
-  canvas.height = height;
-  container.appendChild(canvas);
-
-  var options = {
-    antialias: highQuality,
-    depth: true,
-    premultipliedAlpha: false
-  };
-
-  var context;
-
-  try {
-    context = canvas.getContext('webgl', options);
-  } catch (ex) {}
-  if (!context) {
-    try {
-      context = canvas.getContext('experimental-webgl', options);
-    } catch (ex) {}
-  }
-  if (!context) {
-    throw new Error('WebGL not supported');
-  }
-
-  canvas.addEventListener('webglcontextlost', function(e) {
-    console.warn('context lost');
-  });
-
-  canvas.addEventListener('webglcontextrestored', function(e) {
-    console.warn('context restored');
-  });
-
-  context.viewport(0, 0, width, height);
-  context.cullFace(context.BACK);
-  context.enable(context.CULL_FACE);
-  context.enable(context.DEPTH_TEST);
-  context.clearColor(0.5, 0.5, 0.5, 1);
-
-  if (highQuality) {
-    context.anisotropyExtension = context.getExtension('EXT_texture_filter_anisotropic');
-    if (context.anisotropyExtension) {
-      context.anisotropyExtension.maxAnisotropyLevel = context.getParameter(
-        context.anisotropyExtension.MAX_TEXTURE_MAX_ANISOTROPY_EXT
-      );
-    }
-    
-    context.depthTextureExtension = context.getExtension('WEBGL_depth_texture');
-  }
-
-  return GLX.use(context);
-};
-
-GLX.use = function(context) {
-
-  return (function(GL) {
-
-    var glx = {};
-
-    glx.context = context;
-
-    glx.start = function(render) {
-      return setInterval(function() {
-        requestAnimationFrame(render);
-      }, 17);
-    };
-
-    glx.stop = function(loop) {
-      clearInterval(loop);
-    };
-
-    glx.destroy = function() {
-      context.canvas.parentNode.removeChild(context.canvas);
-      context = null;
-    };
-
-
-glx.util = {};
-
-glx.util.nextPowerOf2 = function(n) {
-  n--;
-  n |= n >> 1;  // handle  2 bit numbers
-  n |= n >> 2;  // handle  4 bit numbers
-  n |= n >> 4;  // handle  8 bit numbers
-  n |= n >> 8;  // handle 16 bit numbers
-  n |= n >> 16; // handle 32 bit numbers
-  n++;
-  return n;
-};
-
-glx.util.calcNormal = function(ax, ay, az, bx, by, bz, cx, cy, cz) {
-  var d1x = ax-bx;
-  var d1y = ay-by;
-  var d1z = az-bz;
-
-  var d2x = bx-cx;
-  var d2y = by-cy;
-  var d2z = bz-cz;
-
-  var nx = d1y*d2z - d1z*d2y;
-  var ny = d1z*d2x - d1x*d2z;
-  var nz = d1x*d2y - d1y*d2x;
-
-  return this.calcUnit(nx, ny, nz);
-};
-
-glx.util.calcUnit = function(x, y, z) {
-  var m = Math.sqrt(x*x + y*y + z*z);
-
-  if (m === 0) {
-    m = 0.00001;
-  }
-
-  return [x/m, y/m, z/m];
-};
-
-
-glx.Buffer = function(itemSize, data) {
-  this.id = GL.createBuffer();
-  this.itemSize = itemSize;
-  this.numItems = data.length/itemSize;
-  GL.bindBuffer(GL.ARRAY_BUFFER, this.id);
-  GL.bufferData(GL.ARRAY_BUFFER, data, GL.STATIC_DRAW);
-  data = null;
-};
-
-glx.Buffer.prototype = {
-  enable: function() {
-    GL.bindBuffer(GL.ARRAY_BUFFER, this.id);
-  },
-
-  destroy: function() {
-    GL.deleteBuffer(this.id);
-    this.id = null;
-  }
-};
-
-
-glx.Framebuffer = function(width, height, useDepthTexture) {
-  if (useDepthTexture && !GL.depthTextureExtension)
-    throw "Depth textures are not supported by your GPU";
-    
-  this.useDepthTexture = !!useDepthTexture;
-  this.setSize(width, height);
-};
-
-glx.Framebuffer.prototype = {
-
-  setSize: function(width, height) {
-    if (!this.frameBuffer) {
-      this.frameBuffer = GL.createFramebuffer();
-    } else if (width === this.width && height === this.height) { // already has the right size
-      return;
-    }
-
-    GL.bindFramebuffer(GL.FRAMEBUFFER, this.frameBuffer);
-
-
-    this.width  = width;
-    this.height = height;
-    
-    if (this.depthRenderBuffer) {
-      GL.deleteRenderbuffer(this.depthRenderBuffer)
-      this.depthRenderBuffer = null;
-    } 
-    
-    if (this.depthTexture) {
-      this.depthTexture.destroy();
-      this.depthTexture = null;
-    }
-    
-    if (this.useDepthTexture) {
-      this.depthTexture = new glx.texture.Image()//GL.createTexture();
-      this.depthTexture.enable(0);
-      GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
-      GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
-      //CLAMP_TO_EDGE is required for NPOT textures
-      GL.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      GL.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      GL.texImage2D(GL.TEXTURE_2D, 0, GL.DEPTH_STENCIL, width, height, 0, GL.DEPTH_STENCIL, GL.depthTextureExtension.UNSIGNED_INT_24_8_WEBGL, null);
-      GL.framebufferTexture2D(GL.FRAMEBUFFER, GL.DEPTH_STENCIL_ATTACHMENT, GL.TEXTURE_2D, this.depthTexture.id, 0);
-    } else {
-      this.depthRenderBuffer = GL.createRenderbuffer();
-      GL.bindRenderbuffer(GL.RENDERBUFFER, this.depthRenderBuffer);
-      GL.renderbufferStorage(GL.RENDERBUFFER, GL.DEPTH_COMPONENT16, width, height);
-      GL.framebufferRenderbuffer(GL.FRAMEBUFFER, GL.DEPTH_ATTACHMENT, GL.RENDERBUFFER, this.depthRenderBuffer);
-    }
-
-    if (this.renderTexture) {
-      this.renderTexture.destroy();
-    }
-
-    this.renderTexture = new glx.texture.Data(width, height);
-    GL.bindTexture(GL.TEXTURE_2D, this.renderTexture.id);
-
-    GL.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); //necessary for NPOT textures
-    GL.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    GL.framebufferTexture2D(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, this.renderTexture.id, 0);
-
-    if (GL.checkFramebufferStatus(GL.FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE) {
-      throw new Error('This combination of framebuffer attachments does not work');
-    }
-
-    GL.bindRenderbuffer(GL.RENDERBUFFER, null);
-    GL.bindFramebuffer(GL.FRAMEBUFFER, null);
-  },
-
-  enable: function() {
-    GL.bindFramebuffer(GL.FRAMEBUFFER, this.frameBuffer);
-
-    if (!this.useDepthTexture) {
-      GL.bindRenderbuffer(GL.RENDERBUFFER, this.depthRenderBuffer);
-    }
-  },
-
-  disable: function() {
-    GL.bindFramebuffer(GL.FRAMEBUFFER, null);
-    if (!this.useDepthTexture) {
-      GL.bindRenderbuffer(GL.RENDERBUFFER, null);
-    }
-  },
-
-  getPixel: function(x, y) {
-    var imageData = new Uint8Array(4);
-    if (x < 0 || y < 0 || x >= this.width || y >= this.height) {
-      return;
-    }
-    GL.readPixels(x, y, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, imageData);
-    return imageData;
-  },
-
-  getData: function() {
-    var imageData = new Uint8Array(this.width*this.height*4);
-    GL.readPixels(0, 0, this.width, this.height, GL.RGBA, GL.UNSIGNED_BYTE, imageData);
-    return imageData;
-  },
-
-  destroy: function() {
-    if (this.renderTexture) {
-      this.renderTexture.destroy();
-    }
-    
-    if (this.depthTexture) {
-      this.depthTexture.destroy();
-    }
-  }
-};
-
-
-glx.Shader = function(config) {
-  var i;
-
-  this.shaderName = config.shaderName;
-  this.id = GL.createProgram();
-
-  this.attach(GL.VERTEX_SHADER,   config.vertexShader);
-  this.attach(GL.FRAGMENT_SHADER, config.fragmentShader);
-
-  GL.linkProgram(this.id);
-
-  if (!GL.getProgramParameter(this.id, GL.LINK_STATUS)) {
-    throw new Error(GL.getProgramParameter(this.id, GL.VALIDATE_STATUS) +'\n'+ GL.getError());
-  }
-
-  this.attributeNames = config.attributes || [];
-  this.uniformNames   = config.uniforms || [];
-  GL.useProgram(this.id);
-
-  this.attributes = {};
-  for (i = 0; i < this.attributeNames.length; i++) {
-    this.locateAttribute(this.attributeNames[i]);
-  }
-  
-  this.uniforms = {};
-  for (i = 0; i < this.uniformNames.length; i++) {
-    this.locateUniform(this.uniformNames[i]);
-  }
-};
-
-glx.Shader.warned = {};
-glx.Shader.prototype = {
-
-  locateAttribute: function(name) {
-    var loc = GL.getAttribLocation(this.id, name);
-    if (loc < 0) {
-      console.warn('unable to locate attribute "%s" in shader "%s"', name, this.shaderName);
-      return;
-    }
-    this.attributes[name] = loc;
-  },
-
-  locateUniform: function(name) {
-    var loc = GL.getUniformLocation(this.id, name);
-    if (!loc) {
-      console.warn('unable to locate uniform "%s" in shader "%s"', name, this.shaderName);
-      return;
-    }
-    this.uniforms[name] = loc;
-  },
-
-  attach: function(type, src) {
-    var shader = GL.createShader(type);
-    GL.shaderSource(shader, src);
-    GL.compileShader(shader);
-
-    if (!GL.getShaderParameter(shader, GL.COMPILE_STATUS)) {
-      throw new Error(GL.getShaderInfoLog(shader));
-    }
-
-    GL.attachShader(this.id, shader);
-  },
-
-  enable: function() {
-    GL.useProgram(this.id);
-
-    for (var name in this.attributes) {
-      GL.enableVertexAttribArray(this.attributes[name]);
-    }
-    
-    return this;
-  },
-
-  disable: function() {
-    if (this.attributes) {
-      for (var name in this.attributes) {
-        GL.disableVertexAttribArray(this.attributes[name]);
-      }
-    }
-  },
-  
-  bindBuffer: function(buffer, attribute) {
-    if (this.attributes[attribute] === undefined) {
-      var qualifiedName = this.shaderName + ":" + attribute;
-      if ( !glx.Shader.warned[qualifiedName]) {
-        console.warn('attempt to bind VBO to invalid attribute "%s" in shader "%s"', attribute, this.shaderName);
-        glx.Shader.warned[qualifiedName] = true;
-      }
-      return;
-    }
-    
-    buffer.enable();
-    GL.vertexAttribPointer(this.attributes[attribute], buffer.itemSize, gl.FLOAT, false, 0, 0);
-  },
-  
-  setUniform: function(uniform, type, value) {
-    if (this.uniforms[uniform] === undefined) {
-      var qualifiedName = this.shaderName + ":" + uniform;
-      if ( !glx.Shader.warned[qualifiedName]) {
-        console.warn('attempt to bind to invalid uniform "%s" in shader "%s"', uniform, this.shaderName);
-        glx.Shader.warned[qualifiedName] = true;
-      }
-
-      return;
-    }
-    GL['uniform'+ type]( this.uniforms[uniform], value);
-  },
-
-  setUniforms: function(uniforms) {
-    for (var i in uniforms) {
-      this.setUniform(uniforms[i][0], uniforms[i][1], uniforms[i][2]);
-    }
-  },
-
-  setUniformMatrix: function(uniform, type, value) {
-    if (this.uniforms[uniform] === undefined) {
-      var qualifiedName = this.shaderName + ":" + uniform;
-      if ( !glx.Shader.warned[qualifiedName]) {
-        console.warn('attempt to bind to invalid uniform "%s" in shader "%s"', uniform, this.shaderName);
-        glx.Shader.warned[qualifiedName] = true;
-      }
-      return;
-    }
-    GL['uniformMatrix'+ type]( this.uniforms[uniform], false, value);
-  },
-
-  setUniformMatrices: function(uniforms) {
-    for (var i in uniforms) {
-      this.setUniformMatrix(uniforms[i][0], uniforms[i][1], uniforms[i][2]);
-    }
-  },
-  
-  bindTexture: function(uniform, textureUnit, glxTexture) {
-    glxTexture.enable(textureUnit);
-    this.setUniform(uniform, "1i", textureUnit);
-  },
-
-  destroy: function() {
-    this.disable();
-    this.id = null;
-  }
-};
-
-
-glx.Matrix = function(data) {
-  this.data = new Float32Array(data ? data : [
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 1, 0,
-    0, 0, 0, 1
-  ]);
-};
-
-glx.Matrix.identity = function() {
-  return new glx.Matrix([
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 1, 0,
-    0, 0, 0, 1
-  ]);
-};
-
-glx.Matrix.identity3 = function() {
-  return new glx.Matrix([
-    1, 0, 0,
-    0, 1, 0,
-    0, 0, 1
-  ]);
-};
-
-(function() {
-
-  function rad(a) {
-    return a * Math.PI/180;
-  }
-
-  function multiply(res, a, b) {
-    var
-      a00 = a[0],
-      a01 = a[1],
-      a02 = a[2],
-      a03 = a[3],
-      a10 = a[4],
-      a11 = a[5],
-      a12 = a[6],
-      a13 = a[7],
-      a20 = a[8],
-      a21 = a[9],
-      a22 = a[10],
-      a23 = a[11],
-      a30 = a[12],
-      a31 = a[13],
-      a32 = a[14],
-      a33 = a[15],
-
-      b00 = b[0],
-      b01 = b[1],
-      b02 = b[2],
-      b03 = b[3],
-      b10 = b[4],
-      b11 = b[5],
-      b12 = b[6],
-      b13 = b[7],
-      b20 = b[8],
-      b21 = b[9],
-      b22 = b[10],
-      b23 = b[11],
-      b30 = b[12],
-      b31 = b[13],
-      b32 = b[14],
-      b33 = b[15];
-
-    res[ 0] = a00*b00 + a01*b10 + a02*b20 + a03*b30;
-    res[ 1] = a00*b01 + a01*b11 + a02*b21 + a03*b31;
-    res[ 2] = a00*b02 + a01*b12 + a02*b22 + a03*b32;
-    res[ 3] = a00*b03 + a01*b13 + a02*b23 + a03*b33;
-
-    res[ 4] = a10*b00 + a11*b10 + a12*b20 + a13*b30;
-    res[ 5] = a10*b01 + a11*b11 + a12*b21 + a13*b31;
-    res[ 6] = a10*b02 + a11*b12 + a12*b22 + a13*b32;
-    res[ 7] = a10*b03 + a11*b13 + a12*b23 + a13*b33;
-
-    res[ 8] = a20*b00 + a21*b10 + a22*b20 + a23*b30;
-    res[ 9] = a20*b01 + a21*b11 + a22*b21 + a23*b31;
-    res[10] = a20*b02 + a21*b12 + a22*b22 + a23*b32;
-    res[11] = a20*b03 + a21*b13 + a22*b23 + a23*b33;
-
-    res[12] = a30*b00 + a31*b10 + a32*b20 + a33*b30;
-    res[13] = a30*b01 + a31*b11 + a32*b21 + a33*b31;
-    res[14] = a30*b02 + a31*b12 + a32*b22 + a33*b32;
-    res[15] = a30*b03 + a31*b13 + a32*b23 + a33*b33;
-  }
-
-  glx.Matrix.prototype = {
-
-    multiply: function(m) {
-      multiply(this.data, this.data, m.data);
-      return this;
-    },
-
-    translate: function(x, y, z) {
-      multiply(this.data, this.data, [
-        1, 0, 0, 0,
-        0, 1, 0, 0,
-        0, 0, 1, 0,
-        x, y, z, 1
-      ]);
-      return this;
-    },
-
-    rotateX: function(angle) {
-      var a = rad(angle), c = Math.cos(a), s = Math.sin(a);
-      multiply(this.data, this.data, [
-        1, 0, 0, 0,
-        0, c, s, 0,
-        0, -s, c, 0,
-        0, 0, 0, 1
-      ]);
-      return this;
-    },
-
-    rotateY: function(angle) {
-      var a = rad(angle), c = Math.cos(a), s = Math.sin(a);
-      multiply(this.data, this.data, [
-        c, 0, -s, 0,
-        0, 1, 0, 0,
-        s, 0, c, 0,
-        0, 0, 0, 1
-      ]);
-      return this;
-    },
-
-    rotateZ: function(angle) {
-      var a = rad(angle), c = Math.cos(a), s = Math.sin(a);
-      multiply(this.data, this.data, [
-        c, -s, 0, 0,
-        s, c, 0, 0,
-        0, 0, 1, 0,
-        0, 0, 0, 1
-      ]);
-      return this;
-    },
-
-    scale: function(x, y, z) {
-      multiply(this.data, this.data, [
-        x, 0, 0, 0,
-        0, y, 0, 0,
-        0, 0, z, 0,
-        0, 0, 0, 1
-      ]);
-      return this;
-    }
-  };
-
-  glx.Matrix.multiply = function(a, b) {
-    var res = new Float32Array(16);
-    multiply(res, a.data, b.data);
-    return res;
-  };
-
-  // returns a perspective projection matrix with a field-of-view of 'fov' 
-  // degrees, an width/height aspect ratio of 'aspect', the near plane at 'near'
-  // and the far plane at 'far'
-  glx.Matrix.Perspective = function(fov, aspect, near, far) {
-    var f =  1 / Math.tan(fov*(Math.PI/180)/2), 
-        nf = 1 / (near - far);
-        
-    return new glx.Matrix([
-      f/aspect, 0,               0,  0,
-      0,        f,               0,  0,
-      0,        0, (far + near)*nf, -1,
-      0,        0, (2*far*near)*nf,  0]);
-  };
-
-  //returns a perspective projection matrix with the near plane at 'near',
-  //the far plane at 'far' and the view rectangle on the near plane bounded
-  //by 'left', 'right', 'top', 'bottom'
-  glx.Matrix.Frustum = function (left, right, top, bottom, near, far) {
-    var rl = 1 / (right - left),
-        tb = 1 / (top - bottom),
-        nf = 1 / (near - far);
-        
-    return new glx.Matrix( [
-          (near * 2) * rl,                   0,                     0,  0,
-                        0,     (near * 2) * tb,                     0,  0,
-      (right + left) * rl, (top + bottom) * tb,     (far + near) * nf, -1,
-                        0,                   0, (far * near * 2) * nf,  0]);
-  };
-  
-  glx.Matrix.OffCenterProjection = function (screenBottomLeft, screenTopLeft, screenBottomRight, eye, near, far) {
-    var vRight = norm3(sub3( screenBottomRight, screenBottomLeft));
-    var vUp    = norm3(sub3( screenTopLeft,     screenBottomLeft));
-    var vNormal= normal( screenBottomLeft, screenTopLeft, screenBottomRight);
-    
-    var eyeToScreenBottomLeft = sub3( screenBottomLeft, eye);
-    var eyeToScreenTopLeft    = sub3( screenTopLeft,    eye);
-    var eyeToScreenBottomRight= sub3( screenBottomRight,eye);
-    
-    var d = - dot3(eyeToScreenBottomLeft, vNormal);
-    
-    var l = dot3(vRight, eyeToScreenBottomLeft) * near / d;
-    var r = dot3(vRight, eyeToScreenBottomRight)* near / d;
-    var b = dot3(vUp,    eyeToScreenBottomLeft) * near / d;
-    var t = dot3(vUp,    eyeToScreenTopLeft)    * near / d;
-    
-    return glx.Matrix.Frustum(l, r, t, b, near, far);
-  };
-  
-  // based on http://www.songho.ca/opengl/gl_projectionmatrix.html
-  glx.Matrix.Ortho = function(left, right, top, bottom, near, far) {
-    return new glx.Matrix([
-                   2/(right-left),                          0,                       0, 0,
-                                0,           2/(top - bottom),                       0, 0,
-                                0,                          0,         -2/(far - near), 0,
-      - (right+left)/(right-left), -(top+bottom)/(top-bottom), - (far+near)/(far-near), 1
-    ]);
-  };
-
-  glx.Matrix.invert3 = function(a) {
-    var
-      a00 = a[0], a01 = a[1], a02 = a[2],
-      a04 = a[4], a05 = a[5], a06 = a[6],
-      a08 = a[8], a09 = a[9], a10 = a[10],
-
-      l =  a10 * a05 - a06 * a09,
-      o = -a10 * a04 + a06 * a08,
-      m =  a09 * a04 - a05 * a08,
-
-      det = a00*l + a01*o + a02*m;
-
-    if (!det) {
-      return null;
-    }
-
-    det = 1.0/det;
-
-    return [
-      l                    * det,
-      (-a10*a01 + a02*a09) * det,
-      ( a06*a01 - a02*a05) * det,
-      o                    * det,
-      ( a10*a00 - a02*a08) * det,
-      (-a06*a00 + a02*a04) * det,
-      m                    * det,
-      (-a09*a00 + a01*a08) * det,
-      ( a05*a00 - a01*a04) * det
-    ];
-  };
-
-  glx.Matrix.transpose3 = function(a) {
-    return new Float32Array([
-      a[0], a[3], a[6],
-      a[1], a[4], a[7],
-      a[2], a[5], a[8]
-    ]);
-  };
-
-  glx.Matrix.transpose = function(a) {
-    return new Float32Array([
-      a[0], a[4],  a[8], a[12], 
-      a[1], a[5],  a[9], a[13], 
-      a[2], a[6], a[10], a[14], 
-      a[3], a[7], a[11], a[15]
-    ]);
-  };
-
-  // glx.Matrix.transform = function(x, y, z, m) {
-  //   var X = x*m[0] + y*m[4] + z*m[8]  + m[12];
-  //   var Y = x*m[1] + y*m[5] + z*m[9]  + m[13];
-  //   var Z = x*m[2] + y*m[6] + z*m[10] + m[14];
-  //   var W = x*m[3] + y*m[7] + z*m[11] + m[15];
-  //   return {
-  //     x: (X/W +1) / 2,
-  //     y: (Y/W +1) / 2
-  //   };
-  // };
-
-  glx.Matrix.transform = function(m) {
-    var X = m[12];
-    var Y = m[13];
-    var Z = m[14];
-    var W = m[15];
-    return {
-      x: (X/W + 1) / 2,
-      y: (Y/W + 1) / 2,
-      z: (Z/W + 1) / 2
-    };
-  };
-
-  glx.Matrix.invert = function(a) {
-    var
-      res = new Float32Array(16),
-
-      a00 = a[ 0], a01 = a[ 1], a02 = a[ 2], a03 = a[ 3],
-      a10 = a[ 4], a11 = a[ 5], a12 = a[ 6], a13 = a[ 7],
-      a20 = a[ 8], a21 = a[ 9], a22 = a[10], a23 = a[11],
-      a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15],
-
-      b00 = a00 * a11 - a01 * a10,
-      b01 = a00 * a12 - a02 * a10,
-      b02 = a00 * a13 - a03 * a10,
-      b03 = a01 * a12 - a02 * a11,
-      b04 = a01 * a13 - a03 * a11,
-      b05 = a02 * a13 - a03 * a12,
-      b06 = a20 * a31 - a21 * a30,
-      b07 = a20 * a32 - a22 * a30,
-      b08 = a20 * a33 - a23 * a30,
-      b09 = a21 * a32 - a22 * a31,
-      b10 = a21 * a33 - a23 * a31,
-      b11 = a22 * a33 - a23 * a32,
-
-      // Calculate the determinant
-      det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
-
-    if (!det) {
-      return;
-    }
-
-    det = 1 / det;
-
-    res[ 0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
-    res[ 1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
-    res[ 2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
-    res[ 3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
-
-    res[ 4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
-    res[ 5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
-    res[ 6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
-    res[ 7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
-
-    res[ 8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
-    res[ 9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
-    res[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
-    res[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
-
-    res[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
-    res[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
-    res[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
-    res[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
-
-    return res;
-  };
-
-}());
-
-
-glx.texture = {};
-
-
-glx.texture.Image = function() {
-  this.id = GL.createTexture();
-  GL.bindTexture(GL.TEXTURE_2D, this.id);
-
-//GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
-//GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
-
-  GL.bindTexture(GL.TEXTURE_2D, null);
-};
-
-glx.texture.Image.prototype = {
-
-  clamp: function(image, maxSize) {
-    if (image.width <= maxSize && image.height <= maxSize) {
-      return image;
-    }
-
-    var w = maxSize, h = maxSize;
-    var ratio = image.width/image.height;
-    // TODO: if other dimension doesn't fit to POT after resize, there is still trouble
-    if (ratio < 1) {
-      w = Math.round(h*ratio);
-    } else {
-      h = Math.round(w/ratio);
-    }
-
-    var canvas = document.createElement('CANVAS');
-    canvas.width  = w;
-    canvas.height = h;
-
-    var context = canvas.getContext('2d');
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
-    return canvas;
-  },
-
-  load: function(url, callback) {
-    var image = new Image();
-    image.crossOrigin = '*';
-    image.onload = function() {
-      this.set(image);
-      if (callback) {
-        callback(image);
-      }
-    }.bind(this);
-    image.onerror = function() {
-      if (callback) {
-        callback();
-      }
-    };
-    image.src = url;
-    return this;
-  },
-
-  color: function(color) {
-    GL.bindTexture(GL.TEXTURE_2D, this.id);
-    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
-    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
-    GL.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([color[0]*255, color[1]*255, color[2]*255, (color[3] === undefined ? 1 : color[3])*255]));
-    GL.bindTexture(GL.TEXTURE_2D, null);
-    return this;
-  },
-
-  set: function(image) {
-    if (!this.id) {
-      // texture has been destroyed
-      return;
-    }
-
-    image = this.clamp(image, GL.getParameter(GL.MAX_TEXTURE_SIZE));
-
-    GL.bindTexture(GL.TEXTURE_2D, this.id);
-    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_NEAREST);
-    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
-
-    GL.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, image);
-    GL.generateMipmap(GL.TEXTURE_2D);
-
-    if (GL.anisotropyExtension) {
-      GL.texParameterf(GL.TEXTURE_2D, GL.anisotropyExtension.TEXTURE_MAX_ANISOTROPY_EXT, GL.anisotropyExtension.maxAnisotropyLevel);
-    }
-
-    GL.bindTexture(GL.TEXTURE_2D, null);
-    return this;
-  },
-
-  enable: function(index) {
-    if (!this.id) {
-      return;
-    }
-    GL.activeTexture(GL.TEXTURE0 + (index || 0));
-    GL.bindTexture(GL.TEXTURE_2D, this.id);
-    return this;
-  },
-
-  destroy: function() {
-    GL.bindTexture(GL.TEXTURE_2D, null);
-    GL.deleteTexture(this.id);
-    this.id = null;
-  }
-};
-
-
-glx.texture.Data = function(width, height, data, options) {
-  //options = options || {};
-
-  this.id = GL.createTexture();
-  GL.bindTexture(GL.TEXTURE_2D, this.id);
-
-  GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
-  GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
-
-  var bytes = null;
-
-  if (data) {
-    var length = width*height*4;
-    bytes = new Uint8Array(length);
-    bytes.set(data.subarray(0, length));
-  }
-
-  GL.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, width, height, 0, GL.RGBA, GL.UNSIGNED_BYTE, bytes);
-  GL.bindTexture(GL.TEXTURE_2D, null);
-};
-
-glx.texture.Data.prototype = {
-
-  enable: function(index) {
-    GL.activeTexture(GL.TEXTURE0 + (index || 0));
-    GL.bindTexture(GL.TEXTURE_2D, this.id);
-    return this;
-  },
-
-  destroy: function() {
-    GL.bindTexture(GL.TEXTURE_2D, null);
-    GL.deleteTexture(this.id);
-    this.id = null;
-  }
-};
-
-
-glx.mesh = {};
-
-glx.mesh.addQuad = function(data, a, b, c, d, color) {
-  this.addTriangle(data, a, b, c, color);
-  this.addTriangle(data, c, d, a, color);
-};
-
-glx.mesh.addTriangle = function(data, a, b, c, color) {
-  data.vertices.push(
-    a[0], a[1], a[2],
-    b[0], b[1], b[2],
-    c[0], c[1], c[2]
-  );
-
-  var n = glx.util.calcNormal(
-    a[0], a[1], a[2],
-    b[0], b[1], b[2],
-    c[0], c[1], c[2]
-  );
-
-  data.normals.push(
-    n[0], n[1], n[2],
-    n[0], n[1], n[2],
-    n[0], n[1], n[2]
-  );
-
-  data.colors.push(
-    color[0], color[1], color[2], color[3],
-    color[0], color[1], color[2], color[3],
-    color[0], color[1], color[2], color[3]
-  );
-};
-
-
-glx.mesh.Triangle = function(size, color) {
-
-  var data = {
-    vertices: [],
-    normals: [],
-    colors: []
-  };
-
-  var a = [-size/2, -size/2, 0];
-  var b = [ size/2, -size/2, 0];
-  var c = [ size/2,  size/2, 0];
-
-  glx.mesh.addTriangle(data, a, b, c, color);
-
-  this.vertexBuffer = new glx.Buffer(3, new Float32Array(data.vertices));
-  this.normalBuffer = new glx.Buffer(3, new Float32Array(data.normals));
-  this.colorBuffer  = new glx.Buffer(4, new Float32Array(data.colors));
-
- 	this.transform = new glx.Matrix();
-};
-
-
-glx.mesh.Plane = function(size, color) {
-
-  var data = {
-    vertices: [],
-    normals: [],
-    colors: []
-  };
-
-  var a = [-size/2, -size/2, 0];
-  var b = [ size/2, -size/2, 0];
-  var c = [ size/2,  size/2, 0];
-  var d = [-size/2,  size/2, 0];
-
-  glx.mesh.addQuad(data, a, b, c, d, color);
-
-  this.vertexBuffer = new glx.Buffer(3, new Float32Array(data.vertices));
-  this.normalBuffer = new glx.Buffer(3, new Float32Array(data.normals));
-  this.colorBuffer  = new glx.Buffer(4, new Float32Array(data.colors));
-
- 	this.transform = new glx.Matrix();
-};
-
-
-glx.mesh.Cube = function(size, color) {
-
-  var data = {
-    vertices: [],
-    normals: [],
-    colors: []
-  };
-
-  var a = [-size/2, -size/2, -size/2];
-  var b = [ size/2, -size/2, -size/2];
-  var c = [ size/2,  size/2, -size/2];
-  var d = [-size/2,  size/2, -size/2];
-
-  var A = [-size/2, -size/2, size/2];
-  var B = [ size/2, -size/2, size/2];
-  var C = [ size/2,  size/2, size/2];
-  var D = [-size/2,  size/2, size/2];
-
-  glx.mesh.addQuad(data, a, b, c, d, color);
-  glx.mesh.addQuad(data, A, B, C, D, color);
-  glx.mesh.addQuad(data, a, b, B, A, color);
-  glx.mesh.addQuad(data, b, c, C, B, color);
-  glx.mesh.addQuad(data, c, d, D, C, color);
-  glx.mesh.addQuad(data, d, a, A, D, color);
-
-  this.vertexBuffer = new glx.Buffer(3, new Float32Array(data.vertices));
-  this.normalBuffer = new glx.Buffer(3, new Float32Array(data.normals));
-  this.colorBuffer  = new glx.Buffer(4, new Float32Array(data.colors));
-
-  this.transform = new glx.Matrix();
-};
-
-
-    return glx;
-
-  }(context));
-};
-
-if (typeof define === 'function') {
-  define([], GLX);
-} else if (typeof exports === 'object') {
-  module.exports = GLX;
-} else {
-  global.GLX = GLX;
-}
-}(this));
-//
 /*
  (c) 2011-2015, Vladimir Agafonkin
  SunCalc is a JavaScript library for calculating sun position and light phases.
@@ -3611,6 +1831,1637 @@ var suncalc = (function () {
 }());
 
 
+var Shaders = {"picking":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec3 aID;\nattribute vec4 aFilter;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform float uFogRadius;\nuniform float uTime;\nvarying vec4 vColor;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    vColor = vec4(0.0, 0.0, 0.0, 0.0);\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    vec4 mPosition = vec4(uModelMatrix * pos);\n    float distance = length(mPosition);\n    if (distance > uFogRadius) {\n      vColor = vec4(0.0, 0.0, 0.0, 0.0);\n    } else {\n      vColor = vec4(aID, 1.0);\n    }\n  }\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nvarying vec4 vColor;\nvoid main() {\n  gl_FragColor = vColor;\n}\n"},"buildings":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nattribute vec3 aNormal;\nattribute vec3 aColor;\nattribute vec4 aFilter;\nattribute vec3 aID;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform mat3 uNormalTransform;\nuniform vec3 uLightDirection;\nuniform vec3 uLightColor;\nuniform vec3 uHighlightColor;\nuniform vec3 uHighlightID;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nuniform float uTime;\nvarying vec3 vColor;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nconst float gradientHeight = 90.0;\nconst float gradientStrength = 0.4;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    vColor = vec3(0.0, 0.0, 0.0);\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    //*** highlight object ******************************************************\n    vec3 color = aColor;\n    if (uHighlightID == aID) {\n      color = mix(aColor, uHighlightColor, 0.5);\n    }\n    //*** light intensity, defined by light direction on surface ****************\n    vec3 transformedNormal = aNormal * uNormalTransform;\n    float lightIntensity = max( dot(transformedNormal, uLightDirection), 0.0) / 1.5;\n    color = color + uLightColor * lightIntensity;\n    vTexCoord = aTexCoord;\n    //*** vertical shading ******************************************************\n    float verticalShading = clamp((gradientHeight-pos.z) / (gradientHeight/gradientStrength), 0.0, gradientStrength);\n    //***************************************************************************\n    vColor = color-verticalShading;\n    vec4 worldPos = uModelMatrix * pos;\n    vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n    verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n  }\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nvarying vec3 vColor;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nuniform vec3 uFogColor;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nuniform sampler2D uWallTexIndex;\nvoid main() {\n    \n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  gl_FragColor = vec4( vColor* texture2D(uWallTexIndex, vTexCoord).rgb, 1.0-fogIntensity);\n}\n"},"buildings.shadows":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec3 aNormal;\nattribute vec3 aColor;\nattribute vec4 aFilter;\nattribute vec3 aID;\nattribute vec2 aTexCoord;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform mat4 uSunMatrix;\nuniform mat3 uNormalTransform;\nuniform vec3 uHighlightColor;\nuniform vec3 uHighlightID;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nuniform float uTime;\nvarying vec3 vColor;\nvarying vec2 vTexCoord;\nvarying vec3 vNormal;\nvarying vec3 vSunRelPosition;\nvarying float verticalDistanceToLowerEdge;\nfloat gradientHeight = 90.0;\nfloat gradientStrength = 0.4;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    vColor = vec3(0.0, 0.0, 0.0);\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    //*** highlight object ******************************************************\n    vec3 color = aColor;\n    if (uHighlightID == aID) {\n      color = mix(aColor, uHighlightColor, 0.5);\n    }\n    //*** light intensity, defined by light direction on surface ****************\n    vNormal = aNormal;\n    vTexCoord = aTexCoord;\n    //vec3 transformedNormal = aNormal * uNormalTransform;\n    //float lightIntensity = max( dot(aNormal, uLightDirection), 0.0) / 1.5;\n    //color = color + uLightColor * lightIntensity;\n    //*** vertical shading ******************************************************\n    float verticalShading = clamp((gradientHeight-pos.z) / (gradientHeight/gradientStrength), 0.0, gradientStrength);\n    //***************************************************************************\n    vColor = color-verticalShading;\n    vec4 worldPos = uModelMatrix * pos;\n    vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n    verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n    \n    // *** shadow mapping ********\n    vec4 sunRelPosition = uSunMatrix * pos;\n    vSunRelPosition = (sunRelPosition.xyz / sunRelPosition.w + 1.0) / 2.0;\n  }\n}\n","fragment":"\n#ifdef GL_FRAGMENT_PRECISION_HIGH\n  precision highp float;\n#else\n  precision mediump float;\n#endif\nvarying vec2 vTexCoord;\nvarying vec3 vColor;\nvarying vec3 vNormal;\nvarying vec3 vSunRelPosition;\nvarying float verticalDistanceToLowerEdge;\nuniform vec3 uFogColor;\nuniform vec2 uShadowTexDimensions;\nuniform sampler2D uShadowTexIndex;\nuniform sampler2D uWallTexIndex;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nuniform float uShadowStrength;\nuniform vec3 uLightDirection;\nuniform vec3 uLightColor;\nfloat isSeenBySun(const vec2 sunViewNDC, const float depth, const float bias) {\n  if ( clamp( sunViewNDC, 0.0, 1.0) != sunViewNDC)  //not inside sun's viewport\n    return 1.0;\n  \n  float depthFromTexture = texture2D( uShadowTexIndex, sunViewNDC.xy).x;\n  \n  //compare depth values not in reciprocal but in linear depth\n  return step(1.0/depthFromTexture, 1.0/depth + bias);\n}\nvoid main() {\n  vec3 normal = normalize(vNormal); //may degenerate during per-pixel interpolation\n  float diffuse = dot(uLightDirection, normal);\n  diffuse = max(diffuse, 0.0);\n  // reduce shadow strength with:\n  // - lowering sun positions, to be consistent with the shadows on the basemap (there,\n  //   shadows are faded out with lowering sun positions to hide shadow artifacts caused\n  //   when sun direction and map surface are almost perpendicular\n  // - large angles between the sun direction and the surface normal, to hide shadow\n  //   artifacts that occur when surface normal and sun direction are almost perpendicular\n  float shadowStrength = pow( max( min(\n    dot(uLightDirection, vec3(0.0, 0.0, 1.0)),\n    dot(uLightDirection, normal)\n  ), 0.0), 1.5);\n  if (diffuse > 0.0 && shadowStrength > 0.0) {\n    // note: the diffuse term is also the cosine between the surface normal and the\n    // light direction\n    float bias = clamp(0.0007*tan(acos(diffuse)), 0.0, 0.01);\n    vec2 pos = fract( vSunRelPosition.xy * uShadowTexDimensions);\n    \n    vec2 tl = floor(vSunRelPosition.xy * uShadowTexDimensions) / uShadowTexDimensions;\n    float tlVal = isSeenBySun( tl,                           vSunRelPosition.z, bias);\n    float trVal = isSeenBySun( tl + vec2(1.0, 0.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float blVal = isSeenBySun( tl + vec2(0.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float brVal = isSeenBySun( tl + vec2(1.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float occludedBySun = mix( \n                            mix(tlVal, trVal, pos.x), \n                            mix(blVal, brVal, pos.x),\n                            pos.y);\n    diffuse *= 1.0 - (shadowStrength * (1.0 - occludedBySun));\n  }\n  vec3 color = vColor* texture2D( uWallTexIndex, vTexCoord.st).rgb +\n              (diffuse/1.5) * uLightColor;\n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  //gl_FragColor = vec4( mix(color, uFogColor, fogIntensity), 1.0);\n  gl_FragColor = vec4( color, 1.0-fogIntensity);\n}\n"},"flatColor":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nuniform mat4 uMatrix;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform vec4 uColor;\nvoid main() {\n  gl_FragColor = uColor;\n}\n"},"skywall":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uMatrix;\nuniform float uAbsoluteHeight;\nvarying vec2 vTexCoord;\nvarying float vRelativeHeight;\nconst float gradientHeight = 10.0;\nconst float gradientStrength = 1.0;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n  vRelativeHeight = aPosition.z / uAbsoluteHeight;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nuniform vec3 uFogColor;\nvarying vec2 vTexCoord;\nvarying float vRelativeHeight;\nvoid main() {\n  float blendFactor = min(100.0 * vRelativeHeight, 1.0);\n  vec4 texColor = texture2D(uTexIndex, vTexCoord);\n  gl_FragColor = mix( vec4(uFogColor, 1.0), texColor,  blendFactor);\n}\n"},"basemap":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uModelMatrix;\nuniform mat4 uViewMatrix;\nuniform mat4 uProjMatrix;\nuniform mat4 uMatrix;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n  vec4 worldPos = uModelMatrix * aPosition;\n  vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n  verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nuniform vec3 uFogColor;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nvoid main() {\n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  gl_FragColor = vec4(texture2D(uTexIndex, vec2(vTexCoord.x, 1.0-vTexCoord.y)).rgb, 1.0-fogIntensity);\n}\n"},"texture":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uMatrix;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_FragColor = vec4(texture2D(uTexIndex, vTexCoord.st).rgb, 1.0);\n}\n"},"fogNormal":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec4 aFilter;\nattribute vec3 aNormal;\nuniform mat4 uMatrix;\nuniform mat4 uModelMatrix;\nuniform mat3 uNormalMatrix;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nvarying float verticalDistanceToLowerEdge;\nvarying vec3 vNormal;\nuniform float uTime;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    verticalDistanceToLowerEdge = 0.0;\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    vNormal = uNormalMatrix * aNormal;\n    vec4 worldPos = uModelMatrix * pos;\n    vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n    verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n  }\n}\n","fragment":"\n#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nvarying float verticalDistanceToLowerEdge;\nvarying vec3 vNormal;\nvoid main() {\n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  gl_FragColor = vec4(normalize(vNormal) / 2.0 + 0.5, clamp(fogIntensity, 0.0, 1.0));\n}\n"},"ambientFromDepth":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_FRAGMENT_PRECISION_HIGH\n  // we need high precision for the depth values\n  precision highp float;\n#else\n  precision mediump float;\n#endif\nuniform sampler2D uDepthTexIndex;\nuniform sampler2D uFogTexIndex;\nuniform vec2 uInverseTexSize;   //in 1/pixels, e.g. 1/512 if the texture is 512px wide\nuniform float uEffectStrength;\nuniform float uNearPlane;\nuniform float uFarPlane;\nvarying vec2 vTexCoord;\n/* Retrieves the depth value 'offset' pixels away from 'pos' from texture 'uDepthTexIndex'. */\nfloat getDepth(vec2 pos, ivec2 offset)\n{\n  float z = texture2D(uDepthTexIndex, pos + float(offset) * uInverseTexSize).x;\n  return (2.0 * uNearPlane) / (uFarPlane + uNearPlane - z * (uFarPlane - uNearPlane)); // linearize depth\n}\n/* getOcclusionFactor() determines a heuristic factor (from [0..1]) for how \n * much the fragment at 'pos' with depth 'depthHere'is occluded by the \n * fragment that is (dx, dy) texels away from it.\n */\nfloat getOcclusionFactor(float depthHere, vec2 pos, ivec2 offset)\n{\n    float depthThere = getDepth(pos, offset);\n    /* if the fragment at (dx, dy) has no depth (i.e. there was nothing rendered there), \n     * then 'here' is not occluded (result 1.0) */\n    if (depthThere == 0.0)\n      return 1.0;\n    /* if the fragment at (dx, dy) is further away from the viewer than 'here', then\n     * 'here is not occluded' */\n    if (depthHere < depthThere )\n      return 1.0;\n      \n    float relDepthDiff = depthThere / depthHere;\n    float depthDiff = abs(depthThere - depthHere) * uFarPlane;\n    /* if the fragment at (dx, dy) is closer to the viewer than 'here', then it occludes\n     * 'here'. The occlusion is the higher the bigger the depth difference between the two\n     * locations is.\n     * However, if the depth difference is too high, we assume that 'there' lies in a\n     * completely different depth region of the scene than 'here' and thus cannot occlude\n     * 'here'. This last assumption gets rid of very dark artifacts around tall buildings.\n     */\n    return depthDiff < 50.0 ? mix(0.99, 1.0, 1.0 - clamp(depthDiff, 0.0, 1.0)) : 1.0;\n}\n/* This shader approximates the ambient occlusion in screen space (SSAO). \n * It is based on the assumption that a pixel will be occluded by neighboring \n * pixels iff. those have a depth value closer to the camera than the original\n * pixel itself (the function getOcclusionFactor() computes this occlusion \n * by a single other pixel).\n *\n * A naive approach would sample all pixels within a given distance. For an\n * interesting-looking effect, the sampling area needs to be at least 9 pixels \n * wide (-/+ 4), requiring 81 texture lookups per pixel for ambient occlusion.\n * This overburdens many GPUs.\n * To make the ambient occlusion computation faster, we do not consider all \n * texels in the sampling area, but only 16. This causes some sampling artifacts\n * that are later removed by blurring the ambient occlusion texture (this is \n * done in a separate shader).\n */\nvoid main() {\n  float depthHere = getDepth(vTexCoord, ivec2(0, 0));\n  float fogIntensity = texture2D(uFogTexIndex, vTexCoord).w;\n  if (depthHere == 0.0)\n  {\n\t//there was nothing rendered 'here' --> it can't be occluded\n    gl_FragColor = vec4(1.0);\n    return;\n  }\n  float occlusionFactor = 1.0;\n  \n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-1,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+1,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, -1));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, +1));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-2, -2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+2, +2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+2, -2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-2, +2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-4,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+4,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, -4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, +4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-4, -4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+4, +4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+4, -4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-4, +4));\n  occlusionFactor = pow(occlusionFactor, 4.0) + 55.0/255.0; // empirical bias determined to let SSAO have no effect on the map plane\n  occlusionFactor = 1.0 - ((1.0 - occlusionFactor) * uEffectStrength * (1.0-fogIntensity));\n  gl_FragColor = vec4(vec3(occlusionFactor), 1.0);\n}\n"},"blur":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nuniform vec2 uInverseTexSize;   //in 1/pixels, e.g. 1/512 if the texture is 512px wide\nvarying vec2 vTexCoord;\n/* Retrieves the texel color 'offset' pixels away from 'pos' from texture 'uTexIndex'. */\nvec4 getTexel(vec2 pos, vec2 offset)\n{\n  return texture2D(uTexIndex, pos + offset * uInverseTexSize);\n}\nvoid main() {\n  vec4 center = texture2D(uTexIndex, vTexCoord);\n  vec4 nonDiagonalNeighbors = getTexel(vTexCoord, vec2(-1.0,  0.0)) +\n                              getTexel(vTexCoord, vec2(+1.0,  0.0)) +\n                              getTexel(vTexCoord, vec2( 0.0, -1.0)) +\n                              getTexel(vTexCoord, vec2( 0.0, +1.0));\n  vec4 diagonalNeighbors =    getTexel(vTexCoord, vec2(-1.0, -1.0)) +\n                              getTexel(vTexCoord, vec2(+1.0, +1.0)) +\n                              getTexel(vTexCoord, vec2(-1.0, +1.0)) +\n                              getTexel(vTexCoord, vec2(+1.0, -1.0));\n  \n  //approximate Gaussian blur (mean 0.0, stdev 1.0)\n  gl_FragColor = 0.2/1.0 * center + \n                 0.5/4.0 * nonDiagonalNeighbors + \n                 0.3/4.0 * diagonalNeighbors;\n}\n"},"basemap.shadows":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec3 aPosition;\nattribute vec3 aNormal;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform mat4 uSunMatrix;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\n//varying vec2 vTexCoord;\nvarying vec3 vSunRelPosition;\nvarying vec3 vNormal;\nvarying float verticalDistanceToLowerEdge;\nvoid main() {\n  vec4 pos = vec4(aPosition.xyz, 1.0);\n  gl_Position = uMatrix * pos;\n  vec4 sunRelPosition = uSunMatrix * pos;\n  vSunRelPosition = (sunRelPosition.xyz / sunRelPosition.w + 1.0) / 2.0;\n  vNormal = aNormal;\n  vec4 worldPos = uModelMatrix * pos;\n  vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n  verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n}\n","fragment":"\n#ifdef GL_FRAGMENT_PRECISION_HIGH\n  precision highp float;\n#else\n  precision mediump float;\n#endif\n/* This shader computes the diffuse brightness of the map layer. It does *not* \n * render the map texture itself, but is instead intended to be blended on top\n * of an already rendered map.\n * Note: this shader is not (and does not attempt to) be physically correct.\n *       It is intented to be a blend between a useful illustration of cast\n *       shadows and a mitigation of shadow casting artifacts occuring at\n *       low angles on incidence.\n *       Map brightness is only affected by shadows, not by light direction.\n *       Shadows are darkest when light comes from straight above (and thus\n *       shadows can be computed reliably) and become less and less visible\n *       with the light source close to the horizont (where moirC) and offset\n *       artifacts would otherwise be visible).\n */\n//uniform sampler2D uTexIndex;\nuniform sampler2D uShadowTexIndex;\nuniform vec3 uFogColor;\nuniform vec3 uDirToSun;\nuniform vec2 uShadowTexDimensions;\nuniform float uShadowStrength;\nvarying vec2 vTexCoord;\nvarying vec3 vSunRelPosition;\nvarying vec3 vNormal;\nvarying float verticalDistanceToLowerEdge;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nfloat isSeenBySun( const vec2 sunViewNDC, const float depth, const float bias) {\n  if ( clamp( sunViewNDC, 0.0, 1.0) != sunViewNDC)  //not inside sun's viewport\n    return 1.0;\n  \n  float depthFromTexture = texture2D( uShadowTexIndex, sunViewNDC.xy).x;\n  \n  //compare depth values not in reciprocal but in linear depth\n  return step(1.0/depthFromTexture, 1.0/depth + bias);\n}\nvoid main() {\n  //vec2 tl = floor(vSunRelPosition.xy * uShadowTexDimensions) / uShadowTexDimensions;\n  //gl_FragColor = vec4(vec3(texture2D( uShadowTexIndex, tl).x), 1.0);\n  //return;\n  float diffuse = dot(uDirToSun, normalize(vNormal));\n  diffuse = max(diffuse, 0.0);\n  \n  float shadowStrength = uShadowStrength * pow(diffuse, 1.5);\n  if (diffuse > 0.0) {\n    // note: the diffuse term is also the cosine between the surface normal and the\n    // light direction\n    float bias = clamp(0.0007*tan(acos(diffuse)), 0.0, 0.01);\n    \n    vec2 pos = fract( vSunRelPosition.xy * uShadowTexDimensions);\n    \n    vec2 tl = floor(vSunRelPosition.xy * uShadowTexDimensions) / uShadowTexDimensions;\n    float tlVal = isSeenBySun( tl,                           vSunRelPosition.z, bias);\n    float trVal = isSeenBySun( tl + vec2(1.0, 0.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float blVal = isSeenBySun( tl + vec2(0.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float brVal = isSeenBySun( tl + vec2(1.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    diffuse = mix( mix(tlVal, trVal, pos.x), \n                   mix(blVal, brVal, pos.x),\n                   pos.y);\n  }\n  diffuse = mix(1.0, diffuse, shadowStrength);\n  \n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  float darkness = (1.0 - diffuse);\n  darkness *=  (1.0 - fogIntensity);\n  gl_FragColor = vec4(vec3(1.0 - darkness), 1.0);\n}\n"},"outlineMap":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uMatrix;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_FRAGMENT_PRECISION_HIGH\n  // we need high precision for the depth values\n  precision highp float;\n#else\n  precision mediump float;\n#endif\nuniform sampler2D uDepthTexIndex;\nuniform sampler2D uFogNormalTexIndex;\nuniform sampler2D uIdTexIndex;\nuniform vec2 uInverseTexSize;   //in 1/pixels, e.g. 1/512 if the texture is 512px wide\nuniform float uEffectStrength;\nuniform float uNearPlane;\nuniform float uFarPlane;\nvarying vec2 vTexCoord;\n/* Retrieves the depth value 'offset' pixels away from 'pos' from texture 'uDepthTexIndex'. */\nfloat getDepth(vec2 pos, vec2 offset)\n{\n  float z = texture2D(uDepthTexIndex, pos + offset * uInverseTexSize).x;\n  return (2.0 * uNearPlane) / (uFarPlane + uNearPlane - z * (uFarPlane - uNearPlane)); // linearize depth\n}\nvec3 getNormal(vec2 pos, vec2 offset)\n{\n  return normalize(texture2D(uFogNormalTexIndex, pos + offset * uInverseTexSize).xyz * 2.0 - 1.0);\n}\nvec3 getEncodedId(vec2 pos, vec2 offset)\n{\n  return texture2D(uIdTexIndex, pos + offset * uInverseTexSize).xyz;\n}\nvoid main() {\n  float fogIntensity = texture2D(uFogNormalTexIndex, vTexCoord).w;\n  vec3 normalHere =  getNormal(vTexCoord, vec2(0, 0));\n  vec3 normalRight = getNormal(vTexCoord, vec2(1, 0));\n  vec3 normalAbove = getNormal(vTexCoord, vec2(0,-1));\n  \n  float edgeStrengthFromNormal = \n    step( dot(normalHere, normalRight), 0.9) +\n    step( dot(normalHere, normalAbove), 0.9);\n  float depthHere =  getDepth(vTexCoord, vec2(0,  0));\n  float depthRight = getDepth(vTexCoord, vec2(1,  0));\n  float depthAbove = getDepth(vTexCoord, vec2(0, -1));\n  float depthDiffRight = abs(depthHere - depthRight) * 7500.0;\n  float depthDiffAbove = abs(depthHere - depthAbove) * 7500.0;\n  float edgeStrengthFromDepth = step(10.0, depthDiffRight) + \n                                step(10.0, depthDiffAbove);\n  \n  vec3 idHere = getEncodedId(vTexCoord, vec2(0,0));\n  vec3 idRight = getEncodedId(vTexCoord, vec2(1,0));\n  vec3 idAbove = getEncodedId(vTexCoord, vec2(0,-1));\n  float edgeStrengthFromId = (idHere != idRight || idHere != idAbove) ? 1.0 : 0.0;\n  \n  float edgeStrength = max( edgeStrengthFromId, max( edgeStrengthFromNormal, edgeStrengthFromDepth));\n  float occlusionFactor = 1.0 - (edgeStrength * uEffectStrength);\n  occlusionFactor = 1.0 - ((1.0- occlusionFactor) * (1.0-fogIntensity));\n  gl_FragColor = vec4(vec3(occlusionFactor), 1.0);\n}\n"}};
+
+var GLX = (function() {
+//var ext = GL.getExtension('WEBGL_lose_context');
+//ext.loseContext();
+
+var GLX = {};
+var GL;
+
+GLX.init = function(container, width, height, highQuality) {
+  var canvas = document.createElement('CANVAS');
+  canvas.style.position = 'absolute';
+  canvas.width = width;
+  canvas.height = height;
+  container.appendChild(canvas);
+
+  var options = {
+    antialias: highQuality,
+    depth: true,
+    premultipliedAlpha: false
+  };
+
+  try {
+    GL = canvas.getContext('webgl', options);
+  } catch (ex) {}
+  if (!GL) {
+    try {
+      GL = canvas.getContext('experimental-webgl', options);
+    } catch (ex) {}
+  }
+  if (!GL) {
+    throw new Error('WebGL not supported');
+  }
+
+  canvas.addEventListener('webglcontextlost', function(e) {
+    console.warn('context lost');
+  });
+
+  canvas.addEventListener('webglcontextrestored', function(e) {
+    console.warn('context restored');
+  });
+
+  GL.viewport(0, 0, width, height);
+  GL.cullFace(GL.BACK);
+  GL.enable(GL.CULL_FACE);
+  GL.enable(GL.DEPTH_TEST);
+  GL.clearColor(0.5, 0.5, 0.5, 1);
+
+  if (highQuality) {
+    GL.anisotropyExtension = GL.getExtension('EXT_texture_filter_anisotropic');
+    if (GL.anisotropyExtension) {
+      GL.anisotropyExtension.maxAnisotropyLevel = GL.getParameter(
+        GL.anisotropyExtension.MAX_TEXTURE_MAX_ANISOTROPY_EXT
+      );
+    }
+
+    GL.depthTextureExtension = GL.getExtension('WEBGL_depth_texture');
+  }
+
+  return GL;
+};
+
+GLX.start = function(render) {
+  return setInterval(function() {
+    requestAnimationFrame(render);
+  }, 17);
+};
+
+GLX.stop = function(loop) {
+  clearInterval(loop);
+};
+
+GLX.destroy = function() {
+  if (GL !== undefined) {
+    GL.canvas.parentNode.removeChild(GL.canvas);
+    GL = undefined;
+  }
+};
+
+
+GLX.util = {};
+
+GLX.util.nextPowerOf2 = function(n) {
+  n--;
+  n |= n >> 1;  // handle  2 bit numbers
+  n |= n >> 2;  // handle  4 bit numbers
+  n |= n >> 4;  // handle  8 bit numbers
+  n |= n >> 8;  // handle 16 bit numbers
+  n |= n >> 16; // handle 32 bit numbers
+  n++;
+  return n;
+};
+
+GLX.util.calcNormal = function(ax, ay, az, bx, by, bz, cx, cy, cz) {
+  var d1x = ax-bx;
+  var d1y = ay-by;
+  var d1z = az-bz;
+
+  var d2x = bx-cx;
+  var d2y = by-cy;
+  var d2z = bz-cz;
+
+  var nx = d1y*d2z - d1z*d2y;
+  var ny = d1z*d2x - d1x*d2z;
+  var nz = d1x*d2y - d1y*d2x;
+
+  return this.calcUnit(nx, ny, nz);
+};
+
+GLX.util.calcUnit = function(x, y, z) {
+  var m = Math.sqrt(x*x + y*y + z*z);
+
+  if (m === 0) {
+    m = 0.00001;
+  }
+
+  return [x/m, y/m, z/m];
+};
+
+
+GLX.Buffer = function(itemSize, data) {
+  this.id = GL.createBuffer();
+  this.itemSize = itemSize;
+  this.numItems = data.length/itemSize;
+  GL.bindBuffer(GL.ARRAY_BUFFER, this.id);
+  GL.bufferData(GL.ARRAY_BUFFER, data, GL.STATIC_DRAW);
+  data = null;
+};
+
+GLX.Buffer.prototype = {
+  enable: function() {
+    GL.bindBuffer(GL.ARRAY_BUFFER, this.id);
+  },
+
+  destroy: function() {
+    GL.deleteBuffer(this.id);
+    this.id = null;
+  }
+};
+
+
+GLX.Framebuffer = function(width, height, useDepthTexture) {
+  if (useDepthTexture && !GL.depthTextureExtension)
+    throw "Depth textures are not supported by your GPU";
+    
+  this.useDepthTexture = !!useDepthTexture;
+  this.setSize(width, height);
+};
+
+GLX.Framebuffer.prototype = {
+
+  setSize: function(width, height) {
+    if (!this.frameBuffer) {
+      this.frameBuffer = GL.createFramebuffer();
+    } else if (width === this.width && height === this.height) { // already has the right size
+      return;
+    }
+
+    GL.bindFramebuffer(GL.FRAMEBUFFER, this.frameBuffer);
+
+
+    this.width  = width;
+    this.height = height;
+    
+    if (this.depthRenderBuffer) {
+      GL.deleteRenderbuffer(this.depthRenderBuffer);
+      this.depthRenderBuffer = null;
+    } 
+    
+    if (this.depthTexture) {
+      this.depthTexture.destroy();
+      this.depthTexture = null;
+    }
+    
+    if (this.useDepthTexture) {
+      this.depthTexture = new GLX.texture.Image();//GL.createTexture();
+      this.depthTexture.enable(0);
+      GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+      GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
+      //CLAMP_TO_EDGE is required for NPOT textures
+      GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
+      GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
+      GL.texImage2D(GL.TEXTURE_2D, 0, GL.DEPTH_STENCIL, width, height, 0, GL.DEPTH_STENCIL, GL.depthTextureExtension.UNSIGNED_INT_24_8_WEBGL, null);
+      GL.framebufferTexture2D(GL.FRAMEBUFFER, GL.DEPTH_STENCIL_ATTACHMENT, GL.TEXTURE_2D, this.depthTexture.id, 0);
+    } else {
+      this.depthRenderBuffer = GL.createRenderbuffer();
+      GL.bindRenderbuffer(GL.RENDERBUFFER, this.depthRenderBuffer);
+      GL.renderbufferStorage(GL.RENDERBUFFER, GL.DEPTH_COMPONENT16, width, height);
+      GL.framebufferRenderbuffer(GL.FRAMEBUFFER, GL.DEPTH_ATTACHMENT, GL.RENDERBUFFER, this.depthRenderBuffer);
+    }
+
+    if (this.renderTexture) {
+      this.renderTexture.destroy();
+    }
+
+    this.renderTexture = new GLX.texture.Data(width, height);
+    GL.bindTexture(GL.TEXTURE_2D, this.renderTexture.id);
+
+    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE); //necessary for NPOT textures
+    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
+    GL.framebufferTexture2D(GL.FRAMEBUFFER, GL.COLOR_ATTACHMENT0, GL.TEXTURE_2D, this.renderTexture.id, 0);
+
+    if (GL.checkFramebufferStatus(GL.FRAMEBUFFER) !== GL.FRAMEBUFFER_COMPLETE) {
+      throw new Error('This combination of framebuffer attachments does not work');
+    }
+
+    GL.bindRenderbuffer(GL.RENDERBUFFER, null);
+    GL.bindFramebuffer(GL.FRAMEBUFFER, null);
+  },
+
+  enable: function() {
+    GL.bindFramebuffer(GL.FRAMEBUFFER, this.frameBuffer);
+
+    if (!this.useDepthTexture) {
+      GL.bindRenderbuffer(GL.RENDERBUFFER, this.depthRenderBuffer);
+    }
+  },
+
+  disable: function() {
+    GL.bindFramebuffer(GL.FRAMEBUFFER, null);
+    if (!this.useDepthTexture) {
+      GL.bindRenderbuffer(GL.RENDERBUFFER, null);
+    }
+  },
+
+  getPixel: function(x, y) {
+    var imageData = new Uint8Array(4);
+    if (x < 0 || y < 0 || x >= this.width || y >= this.height) {
+      return;
+    }
+    GL.readPixels(x, y, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, imageData);
+    return imageData;
+  },
+
+  getData: function() {
+    var imageData = new Uint8Array(this.width*this.height*4);
+    GL.readPixels(0, 0, this.width, this.height, GL.RGBA, GL.UNSIGNED_BYTE, imageData);
+    return imageData;
+  },
+
+  destroy: function() {
+    if (this.renderTexture) {
+      this.renderTexture.destroy();
+    }
+    
+    if (this.depthTexture) {
+      this.depthTexture.destroy();
+    }
+  }
+};
+
+
+GLX.Shader = function(config) {
+  var i;
+
+  this.shaderName = config.shaderName;
+  this.id = GL.createProgram();
+
+  this.attach(GL.VERTEX_SHADER,   config.vertexShader);
+  this.attach(GL.FRAGMENT_SHADER, config.fragmentShader);
+
+  GL.linkProgram(this.id);
+
+  if (!GL.getProgramParameter(this.id, GL.LINK_STATUS)) {
+    throw new Error(GL.getProgramParameter(this.id, GL.VALIDATE_STATUS) +'\n'+ GL.getError());
+  }
+
+  this.attributeNames = config.attributes || [];
+  this.uniformNames   = config.uniforms || [];
+  GL.useProgram(this.id);
+
+  this.attributes = {};
+  for (i = 0; i < this.attributeNames.length; i++) {
+    this.locateAttribute(this.attributeNames[i]);
+  }
+  
+  this.uniforms = {};
+  for (i = 0; i < this.uniformNames.length; i++) {
+    this.locateUniform(this.uniformNames[i]);
+  }
+};
+
+GLX.Shader.warned = {};
+GLX.Shader.prototype = {
+
+  locateAttribute: function(name) {
+    var loc = GL.getAttribLocation(this.id, name);
+    if (loc < 0) {
+      console.warn('unable to locate attribute "%s" in shader "%s"', name, this.shaderName);
+      return;
+    }
+    this.attributes[name] = loc;
+  },
+
+  locateUniform: function(name) {
+    var loc = GL.getUniformLocation(this.id, name);
+    if (!loc) {
+      console.warn('unable to locate uniform "%s" in shader "%s"', name, this.shaderName);
+      return;
+    }
+    this.uniforms[name] = loc;
+  },
+
+  attach: function(type, src) {
+    var shader = GL.createShader(type);
+    GL.shaderSource(shader, src);
+    GL.compileShader(shader);
+
+    if (!GL.getShaderParameter(shader, GL.COMPILE_STATUS)) {
+      throw new Error(GL.getShaderInfoLog(shader));
+    }
+
+    GL.attachShader(this.id, shader);
+  },
+
+  enable: function() {
+    GL.useProgram(this.id);
+
+    for (var name in this.attributes) {
+      GL.enableVertexAttribArray(this.attributes[name]);
+    }
+    
+    return this;
+  },
+
+  disable: function() {
+    if (this.attributes) {
+      for (var name in this.attributes) {
+        GL.disableVertexAttribArray(this.attributes[name]);
+      }
+    }
+  },
+  
+  bindBuffer: function(buffer, attribute) {
+    if (this.attributes[attribute] === undefined) {
+      var qualifiedName = this.shaderName + ":" + attribute;
+      if ( !GLX.Shader.warned[qualifiedName]) {
+        console.warn('attempt to bind VBO to invalid attribute "%s" in shader "%s"', attribute, this.shaderName);
+        GLX.Shader.warned[qualifiedName] = true;
+      }
+      return;
+    }
+    
+    buffer.enable();
+    GL.vertexAttribPointer(this.attributes[attribute], buffer.itemSize, GL.FLOAT, false, 0, 0);
+  },
+  
+  setUniform: function(uniform, type, value) {
+    if (this.uniforms[uniform] === undefined) {
+      var qualifiedName = this.shaderName + ":" + uniform;
+      if ( !GLX.Shader.warned[qualifiedName]) {
+        console.warn('attempt to bind to invalid uniform "%s" in shader "%s"', uniform, this.shaderName);
+        GLX.Shader.warned[qualifiedName] = true;
+      }
+
+      return;
+    }
+    GL['uniform'+ type]( this.uniforms[uniform], value);
+  },
+
+  setUniforms: function(uniforms) {
+    for (var i in uniforms) {
+      this.setUniform(uniforms[i][0], uniforms[i][1], uniforms[i][2]);
+    }
+  },
+
+  setUniformMatrix: function(uniform, type, value) {
+    if (this.uniforms[uniform] === undefined) {
+      var qualifiedName = this.shaderName + ":" + uniform;
+      if ( !GLX.Shader.warned[qualifiedName]) {
+        console.warn('attempt to bind to invalid uniform "%s" in shader "%s"', uniform, this.shaderName);
+        GLX.Shader.warned[qualifiedName] = true;
+      }
+      return;
+    }
+    GL['uniformMatrix'+ type]( this.uniforms[uniform], false, value);
+  },
+
+  setUniformMatrices: function(uniforms) {
+    for (var i in uniforms) {
+      this.setUniformMatrix(uniforms[i][0], uniforms[i][1], uniforms[i][2]);
+    }
+  },
+  
+  bindTexture: function(uniform, textureUnit, glxTexture) {
+    glxTexture.enable(textureUnit);
+    this.setUniform(uniform, "1i", textureUnit);
+  },
+
+  destroy: function() {
+    this.disable();
+    this.id = null;
+  }
+};
+
+
+GLX.Matrix = function(data) {
+  this.data = new Float32Array(data ? data : [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1
+  ]);
+};
+
+GLX.Matrix.identity = function() {
+  return new GLX.Matrix([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1
+  ]);
+};
+
+GLX.Matrix.identity3 = function() {
+  return new GLX.Matrix([
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1
+  ]);
+};
+
+(function() {
+
+  function rad(a) {
+    return a * Math.PI/180;
+  }
+
+  function multiply(res, a, b) {
+    var
+      a00 = a[0],
+      a01 = a[1],
+      a02 = a[2],
+      a03 = a[3],
+      a10 = a[4],
+      a11 = a[5],
+      a12 = a[6],
+      a13 = a[7],
+      a20 = a[8],
+      a21 = a[9],
+      a22 = a[10],
+      a23 = a[11],
+      a30 = a[12],
+      a31 = a[13],
+      a32 = a[14],
+      a33 = a[15],
+
+      b00 = b[0],
+      b01 = b[1],
+      b02 = b[2],
+      b03 = b[3],
+      b10 = b[4],
+      b11 = b[5],
+      b12 = b[6],
+      b13 = b[7],
+      b20 = b[8],
+      b21 = b[9],
+      b22 = b[10],
+      b23 = b[11],
+      b30 = b[12],
+      b31 = b[13],
+      b32 = b[14],
+      b33 = b[15];
+
+    res[ 0] = a00*b00 + a01*b10 + a02*b20 + a03*b30;
+    res[ 1] = a00*b01 + a01*b11 + a02*b21 + a03*b31;
+    res[ 2] = a00*b02 + a01*b12 + a02*b22 + a03*b32;
+    res[ 3] = a00*b03 + a01*b13 + a02*b23 + a03*b33;
+
+    res[ 4] = a10*b00 + a11*b10 + a12*b20 + a13*b30;
+    res[ 5] = a10*b01 + a11*b11 + a12*b21 + a13*b31;
+    res[ 6] = a10*b02 + a11*b12 + a12*b22 + a13*b32;
+    res[ 7] = a10*b03 + a11*b13 + a12*b23 + a13*b33;
+
+    res[ 8] = a20*b00 + a21*b10 + a22*b20 + a23*b30;
+    res[ 9] = a20*b01 + a21*b11 + a22*b21 + a23*b31;
+    res[10] = a20*b02 + a21*b12 + a22*b22 + a23*b32;
+    res[11] = a20*b03 + a21*b13 + a22*b23 + a23*b33;
+
+    res[12] = a30*b00 + a31*b10 + a32*b20 + a33*b30;
+    res[13] = a30*b01 + a31*b11 + a32*b21 + a33*b31;
+    res[14] = a30*b02 + a31*b12 + a32*b22 + a33*b32;
+    res[15] = a30*b03 + a31*b13 + a32*b23 + a33*b33;
+  }
+
+  GLX.Matrix.prototype = {
+
+    multiply: function(m) {
+      multiply(this.data, this.data, m.data);
+      return this;
+    },
+
+    translate: function(x, y, z) {
+      multiply(this.data, this.data, [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        x, y, z, 1
+      ]);
+      return this;
+    },
+
+    rotateX: function(angle) {
+      var a = rad(angle), c = Math.cos(a), s = Math.sin(a);
+      multiply(this.data, this.data, [
+        1, 0, 0, 0,
+        0, c, s, 0,
+        0, -s, c, 0,
+        0, 0, 0, 1
+      ]);
+      return this;
+    },
+
+    rotateY: function(angle) {
+      var a = rad(angle), c = Math.cos(a), s = Math.sin(a);
+      multiply(this.data, this.data, [
+        c, 0, -s, 0,
+        0, 1, 0, 0,
+        s, 0, c, 0,
+        0, 0, 0, 1
+      ]);
+      return this;
+    },
+
+    rotateZ: function(angle) {
+      var a = rad(angle), c = Math.cos(a), s = Math.sin(a);
+      multiply(this.data, this.data, [
+        c, -s, 0, 0,
+        s, c, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+      ]);
+      return this;
+    },
+
+    scale: function(x, y, z) {
+      multiply(this.data, this.data, [
+        x, 0, 0, 0,
+        0, y, 0, 0,
+        0, 0, z, 0,
+        0, 0, 0, 1
+      ]);
+      return this;
+    }
+  };
+
+  GLX.Matrix.multiply = function(a, b) {
+    var res = new Float32Array(16);
+    multiply(res, a.data, b.data);
+    return res;
+  };
+
+  // returns a perspective projection matrix with a field-of-view of 'fov' 
+  // degrees, an width/height aspect ratio of 'aspect', the near plane at 'near'
+  // and the far plane at 'far'
+  GLX.Matrix.Perspective = function(fov, aspect, near, far) {
+    var f =  1 / Math.tan(fov*(Math.PI/180)/2), 
+        nf = 1 / (near - far);
+        
+    return new GLX.Matrix([
+      f/aspect, 0,               0,  0,
+      0,        f,               0,  0,
+      0,        0, (far + near)*nf, -1,
+      0,        0, (2*far*near)*nf,  0]);
+  };
+
+  //returns a perspective projection matrix with the near plane at 'near',
+  //the far plane at 'far' and the view rectangle on the near plane bounded
+  //by 'left', 'right', 'top', 'bottom'
+  GLX.Matrix.Frustum = function (left, right, top, bottom, near, far) {
+    var rl = 1 / (right - left),
+        tb = 1 / (top - bottom),
+        nf = 1 / (near - far);
+        
+    return new GLX.Matrix( [
+          (near * 2) * rl,                   0,                     0,  0,
+                        0,     (near * 2) * tb,                     0,  0,
+      (right + left) * rl, (top + bottom) * tb,     (far + near) * nf, -1,
+                        0,                   0, (far * near * 2) * nf,  0]);
+  };
+  
+  GLX.Matrix.OffCenterProjection = function (screenBottomLeft, screenTopLeft, screenBottomRight, eye, near, far) {
+    var vRight = norm3(sub3( screenBottomRight, screenBottomLeft));
+    var vUp    = norm3(sub3( screenTopLeft,     screenBottomLeft));
+    var vNormal= normal( screenBottomLeft, screenTopLeft, screenBottomRight);
+    
+    var eyeToScreenBottomLeft = sub3( screenBottomLeft, eye);
+    var eyeToScreenTopLeft    = sub3( screenTopLeft,    eye);
+    var eyeToScreenBottomRight= sub3( screenBottomRight,eye);
+    
+    var d = - dot3(eyeToScreenBottomLeft, vNormal);
+    
+    var l = dot3(vRight, eyeToScreenBottomLeft) * near / d;
+    var r = dot3(vRight, eyeToScreenBottomRight)* near / d;
+    var b = dot3(vUp,    eyeToScreenBottomLeft) * near / d;
+    var t = dot3(vUp,    eyeToScreenTopLeft)    * near / d;
+    
+    return GLX.Matrix.Frustum(l, r, t, b, near, far);
+  };
+  
+  // based on http://www.songho.ca/opengl/gl_projectionmatrix.html
+  GLX.Matrix.Ortho = function(left, right, top, bottom, near, far) {
+    return new GLX.Matrix([
+                   2/(right-left),                          0,                       0, 0,
+                                0,           2/(top - bottom),                       0, 0,
+                                0,                          0,         -2/(far - near), 0,
+      - (right+left)/(right-left), -(top+bottom)/(top-bottom), - (far+near)/(far-near), 1
+    ]);
+  };
+
+  GLX.Matrix.invert3 = function(a) {
+    var
+      a00 = a[0], a01 = a[1], a02 = a[2],
+      a04 = a[4], a05 = a[5], a06 = a[6],
+      a08 = a[8], a09 = a[9], a10 = a[10],
+
+      l =  a10 * a05 - a06 * a09,
+      o = -a10 * a04 + a06 * a08,
+      m =  a09 * a04 - a05 * a08,
+
+      det = a00*l + a01*o + a02*m;
+
+    if (!det) {
+      return null;
+    }
+
+    det = 1.0/det;
+
+    return [
+      l                    * det,
+      (-a10*a01 + a02*a09) * det,
+      ( a06*a01 - a02*a05) * det,
+      o                    * det,
+      ( a10*a00 - a02*a08) * det,
+      (-a06*a00 + a02*a04) * det,
+      m                    * det,
+      (-a09*a00 + a01*a08) * det,
+      ( a05*a00 - a01*a04) * det
+    ];
+  };
+
+  GLX.Matrix.transpose3 = function(a) {
+    return new Float32Array([
+      a[0], a[3], a[6],
+      a[1], a[4], a[7],
+      a[2], a[5], a[8]
+    ]);
+  };
+
+  GLX.Matrix.transpose = function(a) {
+    return new Float32Array([
+      a[0], a[4],  a[8], a[12], 
+      a[1], a[5],  a[9], a[13], 
+      a[2], a[6], a[10], a[14], 
+      a[3], a[7], a[11], a[15]
+    ]);
+  };
+
+  // GLX.Matrix.transform = function(x, y, z, m) {
+  //   var X = x*m[0] + y*m[4] + z*m[8]  + m[12];
+  //   var Y = x*m[1] + y*m[5] + z*m[9]  + m[13];
+  //   var Z = x*m[2] + y*m[6] + z*m[10] + m[14];
+  //   var W = x*m[3] + y*m[7] + z*m[11] + m[15];
+  //   return {
+  //     x: (X/W +1) / 2,
+  //     y: (Y/W +1) / 2
+  //   };
+  // };
+
+  GLX.Matrix.transform = function(m) {
+    var X = m[12];
+    var Y = m[13];
+    var Z = m[14];
+    var W = m[15];
+    return {
+      x: (X/W + 1) / 2,
+      y: (Y/W + 1) / 2,
+      z: (Z/W + 1) / 2
+    };
+  };
+
+  GLX.Matrix.invert = function(a) {
+    var
+      res = new Float32Array(16),
+
+      a00 = a[ 0], a01 = a[ 1], a02 = a[ 2], a03 = a[ 3],
+      a10 = a[ 4], a11 = a[ 5], a12 = a[ 6], a13 = a[ 7],
+      a20 = a[ 8], a21 = a[ 9], a22 = a[10], a23 = a[11],
+      a30 = a[12], a31 = a[13], a32 = a[14], a33 = a[15],
+
+      b00 = a00 * a11 - a01 * a10,
+      b01 = a00 * a12 - a02 * a10,
+      b02 = a00 * a13 - a03 * a10,
+      b03 = a01 * a12 - a02 * a11,
+      b04 = a01 * a13 - a03 * a11,
+      b05 = a02 * a13 - a03 * a12,
+      b06 = a20 * a31 - a21 * a30,
+      b07 = a20 * a32 - a22 * a30,
+      b08 = a20 * a33 - a23 * a30,
+      b09 = a21 * a32 - a22 * a31,
+      b10 = a21 * a33 - a23 * a31,
+      b11 = a22 * a33 - a23 * a32,
+
+      // Calculate the determinant
+      det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+
+    if (!det) {
+      return;
+    }
+
+    det = 1 / det;
+
+    res[ 0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+    res[ 1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+    res[ 2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+    res[ 3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+
+    res[ 4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+    res[ 5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+    res[ 6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+    res[ 7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+
+    res[ 8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+    res[ 9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+    res[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+    res[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+
+    res[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+    res[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+    res[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+    res[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+
+    return res;
+  };
+
+}());
+
+
+GLX.texture = {};
+
+
+GLX.texture.Image = function() {
+  this.id = GL.createTexture();
+  GL.bindTexture(GL.TEXTURE_2D, this.id);
+
+//GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
+//GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
+
+  GL.bindTexture(GL.TEXTURE_2D, null);
+};
+
+GLX.texture.Image.prototype = {
+
+  clamp: function(image, maxSize) {
+    if (image.width <= maxSize && image.height <= maxSize) {
+      return image;
+    }
+
+    var w = maxSize, h = maxSize;
+    var ratio = image.width/image.height;
+    // TODO: if other dimension doesn't fit to POT after resize, there is still trouble
+    if (ratio < 1) {
+      w = Math.round(h*ratio);
+    } else {
+      h = Math.round(w/ratio);
+    }
+
+    var canvas = document.createElement('CANVAS');
+    canvas.width  = w;
+    canvas.height = h;
+
+    var context = canvas.getContext('2d');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  },
+
+  load: function(url, callback) {
+    var image = new Image();
+    image.crossOrigin = '*';
+    image.onload = function() {
+      this.set(image);
+      if (callback) {
+        callback(image);
+      }
+    }.bind(this);
+    image.onerror = function() {
+      if (callback) {
+        callback();
+      }
+    };
+    image.src = url;
+    return this;
+  },
+
+  color: function(color) {
+    GL.bindTexture(GL.TEXTURE_2D, this.id);
+    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
+    GL.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array([color[0]*255, color[1]*255, color[2]*255, (color[3] === undefined ? 1 : color[3])*255]));
+    GL.bindTexture(GL.TEXTURE_2D, null);
+    return this;
+  },
+
+  set: function(image) {
+    if (!this.id) {
+      // texture has been destroyed
+      return;
+    }
+
+    image = this.clamp(image, GL.getParameter(GL.MAX_TEXTURE_SIZE));
+
+    GL.bindTexture(GL.TEXTURE_2D, this.id);
+    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_NEAREST);
+    GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
+
+    GL.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, image);
+    GL.generateMipmap(GL.TEXTURE_2D);
+
+    if (GL.anisotropyExtension) {
+      GL.texParameterf(GL.TEXTURE_2D, GL.anisotropyExtension.TEXTURE_MAX_ANISOTROPY_EXT, GL.anisotropyExtension.maxAnisotropyLevel);
+    }
+
+    GL.bindTexture(GL.TEXTURE_2D, null);
+    return this;
+  },
+
+  enable: function(index) {
+    if (!this.id) {
+      return;
+    }
+    GL.activeTexture(GL.TEXTURE0 + (index || 0));
+    GL.bindTexture(GL.TEXTURE_2D, this.id);
+    return this;
+  },
+
+  destroy: function() {
+    GL.bindTexture(GL.TEXTURE_2D, null);
+    GL.deleteTexture(this.id);
+    this.id = null;
+  }
+};
+
+
+GLX.texture.Data = function(width, height, data, options) {
+  //options = options || {};
+
+  this.id = GL.createTexture();
+  GL.bindTexture(GL.TEXTURE_2D, this.id);
+
+  GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+  GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST);
+
+  var bytes = null;
+
+  if (data) {
+    var length = width*height*4;
+    bytes = new Uint8Array(length);
+    bytes.set(data.subarray(0, length));
+  }
+
+  GL.texImage2D(GL.TEXTURE_2D, 0, GL.RGBA, width, height, 0, GL.RGBA, GL.UNSIGNED_BYTE, bytes);
+  GL.bindTexture(GL.TEXTURE_2D, null);
+};
+
+GLX.texture.Data.prototype = {
+
+  enable: function(index) {
+    GL.activeTexture(GL.TEXTURE0 + (index || 0));
+    GL.bindTexture(GL.TEXTURE_2D, this.id);
+    return this;
+  },
+
+  destroy: function() {
+    GL.bindTexture(GL.TEXTURE_2D, null);
+    GL.deleteTexture(this.id);
+    this.id = null;
+  }
+};
+
+return GLX;
+}());
+
+//
+var GLMap = (function() {
+/**
+ * This is the base map engine for standalone OSM Buildings
+ * @class GLMap
+ */
+
+/**
+ * @private
+ */
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(value, min));
+}
+
+/**
+ * GLMap
+ * @GLMap
+ * @param {HTMLElement} DOM container
+ * @param {Object} options
+ */
+/**
+ * OSMBuildings basemap
+ * @constructor
+ * @param {String} container - The id of the html element to display the map in
+ * @param {Object} options
+ * @param {Integer} [options.minZoom=10] - Minimum allowed zoom
+ * @param {Integer} [options.maxZoom=20] - Maxiumum allowed zoom
+ * @param {Object} [options.bounds] - A bounding box to restrict the map to
+ * @param {Boolean} [options.state=false] - Store the map state in the URL
+ * @param {Boolean} [options.disabled=false] - Disable user input
+ * @param {String} [options.attribution] - An attribution string
+ * @param {Float} [options.zoom=minZoom] - Initial zoom
+ * @param {Float} [options.rotation=0] - Initial rotation
+ * @param {Float} [options.tilt=0] - Initial tilt
+ * @param {Object} [options.position] - Initial position
+ * @param {Float} [options.position.latitude=52.520000]
+ * @param {Float} [options.position.latitude=13.410000]
+ */
+var GLMap = function(container, options) {
+  this.container = typeof container === 'string' ? document.getElementById(container) : container;
+  options = options || {};
+
+  this.container.classList.add('osmb-container');
+  this.width = this.container.offsetWidth;
+  this.height = this.container.offsetHeight;
+
+  this.minZoom = parseFloat(options.minZoom) || 10;
+  this.maxZoom = parseFloat(options.maxZoom) || 20;
+
+  if (this.maxZoom < this.minZoom) {
+    this.maxZoom = this.minZoom;
+  }
+
+  this.bounds = options.bounds;
+
+  this.position = {};
+  this.zoom = 0;
+
+  this.listeners = {};
+  this.layers = [];
+
+  this.initState(options);
+
+  if (options.state) {
+    this.persistState();
+    this.on('change', function() {
+      this.persistState();
+    }.bind(this));
+  }
+
+  Events.init(this);
+
+  if (options.disabled) {
+    this.setDisabled(true);
+  }
+
+  this.attribution = options.attribution;
+  this.attributionDiv = document.createElement('DIV');
+  this.attributionDiv.className = 'osmb-attribution';
+  this.container.appendChild(this.attributionDiv);
+  this.updateAttribution();
+};
+
+GLMap.prototype = {
+
+  /**
+   * @private
+   */
+  updateAttribution: function() {
+    var attribution = [];
+    for (var i = 0; i < this.layers.length; i++) {
+      if (this.layers[i].attribution) {
+        attribution.push(this.layers[i].attribution);
+      }
+    }
+    if (this.attribution) {
+      attribution.unshift(this.attribution);
+    }
+    this.attributionDiv.innerHTML = attribution.join(' · ');
+  },
+
+  /**
+   * @private
+   */
+  initState: function(options) {
+    var
+      query = location.search,
+      state = {};
+    if (query) {
+      query.substring(1).replace(/(?:^|&)([^&=]*)=?([^&]*)/g, function($0, $1, $2) {
+        if ($1) {
+          state[$1] = $2;
+        }
+      });
+    }
+
+    var position;
+    if (state.lat !== undefined && state.lon !== undefined) {
+      position = { latitude: parseFloat(state.lat), longitude: parseFloat(state.lon) };
+    }
+    if (!position && state.latitude !== undefined && state.longitude !== undefined) {
+      position = { latitude: state.latitude, longitude: state.longitude };
+    }
+
+    var zoom = (state.zoom !== undefined) ? state.zoom : options.zoom;
+    var rotation = (state.rotation !== undefined) ? state.rotation : options.rotation;
+    var tilt = (state.tilt !== undefined) ? state.tilt : options.tilt;
+
+    this.setPosition(position || options.position || { latitude: 52.520000, longitude: 13.410000 });
+    this.setZoom(zoom || this.minZoom);
+    this.setRotation(rotation || 0);
+    this.setTilt(tilt || 0);
+  },
+
+  /**
+   * @private
+   */
+  persistState: function() {
+    if (!history.replaceState || this.stateDebounce) {
+      return;
+    }
+
+    this.stateDebounce = setTimeout(function() {
+      this.stateDebounce = null;
+      var params = [];
+      params.push('lat=' + this.position.latitude.toFixed(6));
+      params.push('lon=' + this.position.longitude.toFixed(6));
+      params.push('zoom=' + this.zoom.toFixed(1));
+      params.push('tilt=' + this.tilt.toFixed(1));
+      params.push('rotation=' + this.rotation.toFixed(1));
+      history.replaceState({}, '', '?' + params.join('&'));
+    }.bind(this), 1000);
+  },
+
+  emit: function(type, detail) {
+    var event = new CustomEvent(type, { detail:detail });
+    this.container.dispatchEvent(event);
+  },
+
+  //***************************************************************************
+
+  on: function(type, fn) {
+    this.container.addEventListener(type, fn, false);
+    return this;
+  },
+
+  off: function(type, fn) {
+    this.container.removeEventListener(type, fn, false);
+  },
+
+  setDisabled: function(flag) {
+    Events.disabled = !!flag;
+    return this;
+  },
+
+  isDisabled: function() {
+    return !!Events.disabled;
+  },
+
+  /* returns the geographical bounds of the current view.
+   * notes:
+   * - since the bounds are always axis-aligned they will contain areas that are
+  /**
+   * Returns the geographical bounds of the current view.
+   * Notes:
+   * - Since the bounds are always axis-aligned they will contain areas that are
+   *   not currently visible if the current view is not also axis-aligned.
+   * - The bounds only contain the map area that OSMBuildings considers for rendering.
+   *   OSMBuildings has a rendering distance of about 3.5km, so the bounds will
+   *   never extend beyond that, even if the horizon is visible (in which case the
+   *   bounds would mathematically be infinite).
+   * - the bounds only consider ground level. For example, buildings whose top
+   *   is seen at the lower edge of the screen, but whose footprint is outside
+   * - The bounds only consider ground level. For example, buildings whose top
+   *   is seen at the lower edge of the screen, but whose footprint is outside
+   *   of the current view below the lower edge do not contribute to the bounds.
+   *   so their top may be visible and they may still be out of bounds.
+   */
+  getBounds: function() {
+    var viewQuad = render.getViewQuad(), res = [];
+    for (var i in viewQuad) {
+      res[i] = getPositionFromLocal(viewQuad[i]);
+    }
+    return res;
+  },
+
+  /**
+   * Sets the zoom level
+   * @param {Float} zoom - The new zoom level
+   * @param {Object} e - **Not currently used**
+   * @fires GLMap#zoom
+   * @fires GLMap#change
+   */
+  setZoom: function(zoom, e) {
+    zoom = clamp(parseFloat(zoom), this.minZoom, this.maxZoom);
+
+    if (this.zoom !== zoom) {
+      this.zoom = zoom;
+
+      /* if a screen position was given for which the geographic position displayed
+       * should not change under the zoom */
+      if (e) {
+        //FIXME: add code; this needs to take the current camera (rotation and
+        //       perspective) into account
+        //NOTE:  the old code (comment out below) only works for north-up
+        //       non-perspective views
+        /*
+         var dx = this.container.offsetWidth/2  - e.clientX;
+         var dy = this.container.offsetHeight/2 - e.clientY;
+         this.center.x -= dx;
+         this.center.y -= dy;
+         this.center.x *= ratio;
+         this.center.y *= ratio;
+         this.center.x += dx;
+         this.center.y += dy;*/
+      }
+      /**
+       * Fired when the map is zoomed (in either direction)
+       * @event GLMap#zoom
+       */
+      this.emit('zoom', { zoom: zoom });
+
+      /**
+       * Fired when the map is zoomed, tilted or panned
+       * @event GLMap#change
+       */
+      this.emit('change');
+    }
+    return this;
+  },
+
+  /**
+   * Returns the current zoom level
+   */
+  getZoom: function() {
+    return this.zoom;
+  },
+
+  /**
+   * Sets the map's geographic position
+   * @param {Object} pos - The new position
+   * @param {Float} pos.latitude
+   * @param {Float} pos.longitude
+   * @fires GLMap#change
+   */
+  setPosition: function(pos) {
+    var lat = parseFloat(pos.latitude);
+    var lon = parseFloat(pos.longitude);
+    if (isNaN(lat) || isNaN(lon)) {
+      return;
+    }
+    this.position = { latitude: clamp(lat, -90, 90), longitude: clamp(lon, -180, 180) };
+    this.emit('change');
+    return this;
+  },
+
+  /**
+   * Returns the map's current geographic position
+   */
+  getPosition: function() {
+    return this.position;
+  },
+
+  /**
+   * Sets the map's size
+   * @param {Object} size
+   * @param {Integer} size.width
+   * @param {Integer} size.height
+   * @fires GLMap#resize
+   */
+  setSize: function(size) {
+    if (size.width !== this.width || size.height !== this.height) {
+      this.width = size.width;
+      this.height = size.height;
+
+      /**
+       * Fired when the map is resized
+       * @event GLMap#resize
+       */
+      this.emit('resize', { width: this.width, height: this.height });
+    }
+    return this;
+  },
+
+  /**
+   * Returns the map's current size
+   */
+  getSize: function() {
+    return { width: this.width, height: this.height };
+  },
+
+  /**
+   * Set's the maps rotation
+   * @param {Float} rotation - The new rotation angle
+   * @fires GLMap#rotate
+   * @fires GLMap#change
+   */
+  setRotation: function(rotation) {
+    rotation = parseFloat(rotation)%360;
+    if (this.rotation !== rotation) {
+      this.rotation = rotation;
+
+      /**
+       * Fired when the map is rotated
+       * @event GLMap#rotate
+       */
+      this.emit('rotate', { rotation: rotation });
+      this.emit('change');
+    }
+    return this;
+  },
+
+  /**
+   * Returns the maps current rotation
+   */
+  getRotation: function() {
+    return this.rotation;
+  },
+
+  /**
+   * Sets the map's tilt
+   * @param {Float} tilt - The new tilt
+   * @fires GLMap#tilt
+   * @fires GLMap#change
+   */
+  setTilt: function(tilt) {
+    tilt = clamp(parseFloat(tilt), 0, 45); // bigger max increases shadow moire on base map
+    if (this.tilt !== tilt) {
+      this.tilt = tilt;
+
+      /**
+       * Fired when the map is tilted
+       * @event GLMap#tilt
+       */
+      this.emit('tilt', { tilt: tilt });
+      this.emit('change');
+    }
+    return this;
+  },
+
+  /**
+   * Returns the map's current tilt
+   */
+  getTilt: function() {
+    return this.tilt;
+  },
+
+  /**
+   * Adds a layer to the map
+   * @param {Object} layer - The layer to add
+   */
+  addLayer: function(layer) {
+    this.layers.push(layer);
+    this.updateAttribution();
+    return this;
+  },
+
+  /**
+   * Removes a layer from the map
+   * @param {Object} layer - The layer to remove
+   */
+  removeLayer: function(layer) {
+    this.layers = this.layers.filter(function(item) {
+      return (item !== layer);
+    });
+    this.updateAttribution();
+  },
+
+  /**
+   * Destroys the map
+   */
+  destroy: function() {
+    this.listeners = [];
+    this.layers = [];
+    this.container.innerHTML = '';
+  }
+};
+
+
+// TODO: detect pointerleave from map.container
+// TODO: continue drag/gesture even when off map.container
+// TODO: allow two finger swipe for tilt
+
+// gesture polyfill adapted from https://raw.githubusercontent.com/seznam/JAK/master/lib/polyfills/gesturechange.js
+// MIT License
+
+/**
+ * @private
+ */
+function add2(a, b) {
+  return [a[0] + b[0], a[1] + b[1]];
+}
+
+/**
+ * @private
+ */
+function mul2scalar(a, f) {
+  return [a[0]*f, a[1]*f];
+}
+
+/**
+ * @private
+ */
+function getEventPosition(e, offset) {
+  return {
+    x: e.clientX - offset.x,
+    y: e.clientY - offset.y
+  };
+}
+
+/**
+ * @private
+ */
+function getElementOffset(el) {
+  if (el.getBoundingClientRect) {
+    var box = el.getBoundingClientRect();
+    return { x:box.left, y:box.top };
+  }
+
+  var res = { x:0, y:0 };
+  while(el.nodeType === 1) {
+    res.x += el.offsetLeft;
+    res.y += el.offsetTop;
+    el = el.parentNode;
+  }
+  return res;
+}
+
+/**
+ * @private
+ */
+function cancelEvent(e) {
+  if (e.preventDefault) {
+    e.preventDefault();
+  }
+  //if (e.stopPropagation) {
+  //  e.stopPropagation();
+  //}
+  e.returnValue = false;
+}
+
+/**
+ * @private
+ */
+function addListener(target, type, fn) {
+  target.addEventListener(type, fn, false);
+}
+
+/**
+ * @private
+ */
+var Events = {};
+
+/**
+ * @private
+ */
+Events.disabled = false;
+
+/**
+ * @private
+ */
+Events.init = function(map) {
+
+  if ('ontouchstart' in window) {
+    addListener(map.container, 'touchstart', onTouchStart);
+    addListener(document, 'touchmove', onTouchMove);
+    addListener(document, 'touchend', onTouchEnd);
+    addListener(document, 'gesturechange', onGestureChange);
+  } else {
+    addListener(map.container, 'mousedown', onMouseDown);
+    addListener(document, 'mousemove', onMouseMove);
+    addListener(document, 'mouseup', onMouseUp);
+    addListener(map.container, 'dblclick', onDoubleClick);
+    addListener(map.container, 'mousewheel', onMouseWheel);
+    addListener(map.container, 'DOMMouseScroll', onMouseWheel);
+  }
+
+  var resizeDebounce;
+  addListener(window, 'resize', function() {
+    if (resizeDebounce) {
+      return;
+    }
+    resizeDebounce = setTimeout(function() {
+      resizeDebounce = null;
+        map.setSize({ width:map.container.offsetWidth, height:map.container.offsetHeight });
+    }, 250);
+  });
+
+  //***************************************************************************
+
+  var
+    prevX = 0,
+    prevY = 0,
+    startX = 0,
+    startY = 0,
+    startZoom = 0,
+    startOffset,
+    prevRotation = 0,
+    prevTilt = 0,
+    pointerIsDown = false;
+
+  function onDoubleClick(e) {
+    cancelEvent(e);
+    if (!Events.disabled) {
+      map.setZoom(map.zoom + 1, e);
+    }
+    var pos = getEventPosition(e, getElementOffset(e.target));
+    map.emit('doubleclick', { x:pos.x, y:pos.y, button:e.button });
+  }
+
+  function onMouseDown(e) {
+    cancelEvent(e);
+
+    if (e.button > 1) {
+      return;
+    }
+
+    startZoom = map.zoom;
+    prevRotation = map.rotation;
+    prevTilt = map.tilt;
+
+    startOffset = getElementOffset(e.target);
+    var pos = getEventPosition(e, startOffset);
+    startX = prevX = pos.x;
+    startY = prevY = pos.y;
+
+    pointerIsDown = true;
+
+    map.emit('pointerdown', { x: pos.x, y: pos.y, button: e.button });
+  }
+
+  function onMouseMove(e) {
+    var pos;
+    if (!pointerIsDown) {
+      pos = getEventPosition(e, getElementOffset(e.target));
+    } else {
+      if (e.button === 0 && !e.altKey) {
+        moveMap(e, startOffset);
+      } else {
+        rotateMap(e, startOffset);
+      }
+
+      pos = getEventPosition(e, startOffset);
+      prevX = pos.x;
+      prevY = pos.y;
+    }
+
+    map.emit('pointermove', { x: pos.x, y: pos.y });
+  }
+
+  function onMouseUp(e) {
+    // prevents clicks on other page elements
+    if (!pointerIsDown) {
+      return;
+    }
+
+    var pos = getEventPosition(e, startOffset);
+
+    if (e.button === 0 && !e.altKey) {
+      if (Math.abs(pos.x - startX)>5 || Math.abs(pos.y - startY)>5) {
+        moveMap(e, startOffset);
+      }
+    } else {
+      rotateMap(e, startOffset);
+    }
+
+    pointerIsDown = false;
+
+    map.emit('pointerup', { x: pos.x, y: pos.y, button: e.button });
+  }
+
+  function onMouseWheel(e) {
+    cancelEvent(e);
+
+    var delta = 0;
+    if (e.wheelDeltaY) {
+      delta = e.wheelDeltaY;
+    } else if (e.wheelDelta) {
+      delta = e.wheelDelta;
+    } else if (e.detail) {
+      delta = -e.detail;
+    }
+
+    if (!Events.disabled) {
+      var adjust = 0.2*(delta>0 ? 1 : delta<0 ? -1 : 0);
+      map.setZoom(map.zoom + adjust, e);
+    }
+
+    // we don't emit mousewheel here as we don't want to run into a loop of death
+  }
+
+  //***************************************************************************
+
+  function moveMap(e, offset) {
+    if (Events.disabled) {
+      return;
+    }
+
+    // FIXME: make movement exact, i.e. make the position that
+    // appeared at (prevX, prevY) before appear at (e.offsetX, e.offsetY) now.
+    // the constant 0.86 was chosen experimentally for the map movement to be
+    // "pinned" to the cursor movement when the map is shown top-down
+    var
+      scale = 0.86 * Math.pow(2, -map.zoom),
+      lonScale = 1/Math.cos( map.position.latitude/ 180 * Math.PI),
+      pos = getEventPosition(e, offset),
+      dx = pos.x - prevX,
+      dy = pos.y - prevY,
+      angle = map.rotation * Math.PI/180,
+      vRight   = [ Math.cos(angle),             Math.sin(angle)],
+      vForward = [ Math.cos(angle - Math.PI/2), Math.sin(angle - Math.PI/2)],
+      dir = add2(mul2scalar(vRight, dx), mul2scalar(vForward, -dy));
+
+    var newPosition = {
+      longitude: map.position.longitude - dir[0] * scale*lonScale,
+      latitude:  map.position.latitude  + dir[1] * scale };
+
+    map.setPosition(newPosition);
+    map.emit('move', newPosition);
+  }
+
+  function rotateMap(e, offset) {
+    if (Events.disabled) {
+      return;
+    }
+    var pos = getEventPosition(e, offset);
+    prevRotation += (pos.x - prevX)*(360/innerWidth);
+    prevTilt -= (pos.y - prevY)*(360/innerHeight);
+    map.setRotation(prevRotation);
+    map.setTilt(prevTilt);
+  }
+
+  //***************************************************************************
+
+  var
+    dist1 = 0,
+    angle1 = 0,
+    gestureStarted = false;
+
+  function emitGestureChange(e) {
+    var
+      t1 = e.touches[0],
+      t2 = e.touches[1],
+      dx = t1.clientX - t2.clientX,
+      dy = t1.clientY - t2.clientY,
+      dist2 = dx*dx + dy*dy,
+      angle2 = Math.atan2(dy, dx);
+
+    onGestureChange({ rotation: ((angle2 - angle1)*(180/Math.PI))%360, scale: Math.sqrt(dist2/dist1) });
+  }
+
+  function onTouchStart(e) {
+    cancelEvent(e);
+
+    // gesturechange polyfill
+    if (e.touches.length === 2 && !('ongesturechange' in window)) {
+      var t1 = e.touches[0];
+      var t2 = e.touches[1];
+      var dx = t1.clientX - t2.clientX;
+      var dy = t1.clientY - t2.clientY;
+      dist1 = dx*dx + dy*dy;
+      angle1 = Math.atan2(dy,dx);
+      gestureStarted = true;
+    }
+
+    startZoom = map.zoom;
+    prevRotation = map.rotation;
+    prevTilt = map.tilt;
+
+    if (e.touches.length) {
+      e = e.touches[0];
+    }
+
+    startOffset = getElementOffset(e.target);
+    var pos = getEventPosition(e, offset);
+    startX = prevX = pos.x;
+    startY = prevY = pos.y;
+
+    map.emit('pointerdown', { x: pos.x, y: pos.y, button: 0 });
+  }
+
+  function onTouchMove(e) {
+    var pos = getEventPosition(e.touches[0], startOffset);
+    if (e.touches.length > 1) {
+      map.setTilt(prevTilt + (prevY - pos.y) * (360/innerHeight));
+      prevTilt = map.tilt;
+      // gesturechange polyfill
+      if (!('ongesturechange' in window)) {
+        emitGestureChange(e);
+      }
+    } else {
+      moveMap(e.touches[0], startOffset);
+      map.emit('pointermove', { x: pos.x, y: pos.y });
+    }
+    prevX = pos.x;
+    prevY = pos.y;
+  }
+
+  function onTouchEnd(e) {
+    // gesturechange polyfill
+    gestureStarted = false;
+
+    if (e.touches.length === 0) {
+      map.emit('pointerup', { x: prevX, y: prevY, button: 0 });
+    } else if (e.touches.length === 1) {
+      // There is one touch currently on the surface => gesture ended. Prepare for continued single touch move
+      var pos = getEventPosition(e.touches[0], startOffset);
+      prevX = pos.x;
+      prevY = pos.y;
+    }
+  }
+
+  function onGestureChange(e) {
+    cancelEvent(e);
+
+    if (!Events.disabled) {
+      map.setZoom(startZoom + (e.scale - 1));
+      map.setRotation(prevRotation - e.rotation);
+    }
+
+    map.emit('gesture', e);
+  }
+};
+
+return GLMap;
+}());
+window.GLMap = GLMap;
+
+//
 
 if (CustomEvent === undefined) {
   var CustomEvent = function(type, params) {
@@ -3623,58 +3474,8 @@ if (CustomEvent === undefined) {
   CustomEvent.prototype = window.Event.prototype;
 }
 
-// adapted from https://raw.githubusercontent.com/seznam/JAK/master/lib/polyfills/gesturechange.js
-// MIT License
-
-if (!('ongesturechange' in window) && 'ontouchstart' in window) {
-  (function() {
-
-    var dist1 = 0;
-    var angle1 = 0;
-    var gestureStarted = false;
-
-    document.addEventListener('touchstart', function(e) {
-      if (e.touches.length !== 2) { return; }
-      var t1 = e.touches[0];
-      var t2 = e.touches[1];
-      var dx = t1.clientX - t2.clientX;
-      var dy = t1.clientY - t2.clientY;
-      dist1 = dx*dx + dy*dy;
-      angle1 = Math.atan2(dy,dx);
-      gestureStarted = true;
-    }, false);
-
-    document.addEventListener('touchmove', function(e) {
-      if (e.touches.length !== 2) { return; }
-
-      var t1 = e.touches[0];
-      var t2 = e.touches[1];
-      var dx = t1.clientX - t2.clientX;
-      var dy = t1.clientY - t2.clientY;
-      var dist2 = dx*dx + dy*dy;
-      var angle2 = Math.atan2(dy,dx);
-
-      var event = new CustomEvent('gesturechange', { bubbles: true });
-      event.altKey = e.altKey;
-      event.ctrlKey = e.ctrlKey;
-      event.metaKey = e.metaKey;
-      event.shiftKey = e.shiftKey;
-      event.rotation = ((angle2 - angle1) * (180 / Math.PI)) % 360;
-      event.scale = Math.sqrt(dist2/dist1);
-
-      // setTimeout(function() { target.dispatchEvent(event); }, 0);
-      e.target.dispatchEvent(event);
-    }, false);
-
-    document.addEventListener('touchend', function(e) {
-      gestureStarted = false;
-    }, false);
-
-  }());
-}
-
 var APP;
-var MAP, glx, gl;
+var MAP, GL;
 /*
  * Note: OSMBuildings cannot use a single global world coordinate system.
  *       The numerical accuracy required for such a system would be about
@@ -3738,7 +3539,7 @@ var OSMBuildings = function(options) {
   }
 };
 
-OSMBuildings.VERSION = '2.4.2';
+OSMBuildings.VERSION = '2.4.3';
 OSMBuildings.ATTRIBUTION = '<a href="http://osmbuildings.org">© OSM Buildings</a>';
 
 OSMBuildings.prototype = {
@@ -3754,7 +3555,7 @@ OSMBuildings.prototype = {
    * @param {OSMBuildings~eventListenerFunction} callback
    */
   on: function(type, fn) {
-    gl.canvas.addEventListener(type, fn);
+    GL.canvas.addEventListener(type, fn);
     return this;
   },
 
@@ -3764,12 +3565,12 @@ OSMBuildings.prototype = {
    * @param {OSMBuildings~eventListenerFunction} [fn] - If given, only remove the given function
    */
   off: function(type, fn) {
-    gl.canvas.removeEventListener(type, fn);
+    GL.canvas.removeEventListener(type, fn);
   },
 
   emit: function(type, detail) {
     var event = new CustomEvent(type, { detail:detail });
-    gl.canvas.dispatchEvent(event);
+    GL.canvas.dispatchEvent(event);
   },
 
   /**
@@ -3778,8 +3579,7 @@ OSMBuildings.prototype = {
    */
   addTo: function(map) {
     MAP = map;
-    glx = new GLX(MAP.container, MAP.width, MAP.height, APP.highQuality);
-    gl = glx.context;
+    GL = GLX.init(MAP.container, MAP.width, MAP.height, APP.highQuality);
 
     MAP.addLayer(this);
 
@@ -3857,7 +3657,7 @@ OSMBuildings.prototype = {
    * @param {Integer} y - the y position in the viewport
    */
   unproject: function(x, y) {
-    var inverse = glx.Matrix.invert(render.viewProjMatrix.data);
+    var inverse = GLX.Matrix.invert(render.viewProjMatrix.data);
     /* convert window/viewport coordinates to NDC [0..1]. Note that the browser
      * screen coordinates are y-down, while the WebGL NDC coordinates are y-up,
      * so we have to invert the y value here */
@@ -3878,6 +3678,7 @@ OSMBuildings.prototype = {
 
   /**
    * Adds an OBJ (3D object) file to the map
+   * Important: objects with same url are cached and only loaded once
    * @param {String} url - URL of the OBJ file
    * @param {Object} position - Where to render the OBJ
    * @param {Float} position.latitude - Latitude for the OBJ
@@ -4028,18 +3829,18 @@ OSMBuildings.prototype = {
     if (APP.dataGrid)    APP.dataGrid.destroy();
 
     // TODO: when taking over an existing canvas, don't destroy it here
-    glx.destroy();
+    GLX.destroy();
   }
 };
 
 //*****************************************************************************
 
-if (typeof global.define === 'function') {
-  global.define([], OSMBuildings);
-} else if (typeof global.exports === 'object') {
-  global.module.exports = OSMBuildings;
+if (typeof define === 'function') {
+  define([], OSMBuildings);
+} else if (typeof module === 'object') {
+  module.exports = OSMBuildings;
 } else {
-  global.OSMBuildings = OSMBuildings;
+  window.OSMBuildings = OSMBuildings;
 }
 
 
@@ -4113,7 +3914,7 @@ var FOG_COLOR = '#e8e0d8';
 //var FOG_COLOR = '#f0f8ff';
 var BACKGROUND_COLOR = '#efe8e0';
 
-var document = global.document;
+var document = window.document;
 
 var EARTH_RADIUS_IN_METERS = 6378137;
 var EARTH_CIRCUMFERENCE_IN_METERS = EARTH_RADIUS_IN_METERS * Math.PI * 2;
@@ -4272,8 +4073,6 @@ function substituteZCoordinate(points, zValue) {
   return res;
 }
 
-
-var Shaders = {"picking":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec3 aID;\nattribute vec4 aFilter;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform float uFogRadius;\nuniform float uTime;\nvarying vec4 vColor;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    vColor = vec4(0.0, 0.0, 0.0, 0.0);\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    vec4 mPosition = vec4(uModelMatrix * pos);\n    float distance = length(mPosition);\n    if (distance > uFogRadius) {\n      vColor = vec4(0.0, 0.0, 0.0, 0.0);\n    } else {\n      vColor = vec4(aID, 1.0);\n    }\n  }\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nvarying vec4 vColor;\nvoid main() {\n  gl_FragColor = vColor;\n}\n"},"buildings":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nattribute vec3 aNormal;\nattribute vec3 aColor;\nattribute vec4 aFilter;\nattribute vec3 aID;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform mat3 uNormalTransform;\nuniform vec3 uLightDirection;\nuniform vec3 uLightColor;\nuniform vec3 uHighlightColor;\nuniform vec3 uHighlightID;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nuniform float uTime;\nvarying vec3 vColor;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nconst float gradientHeight = 90.0;\nconst float gradientStrength = 0.4;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    vColor = vec3(0.0, 0.0, 0.0);\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    //*** highlight object ******************************************************\n    vec3 color = aColor;\n    if (uHighlightID == aID) {\n      color = mix(aColor, uHighlightColor, 0.5);\n    }\n    //*** light intensity, defined by light direction on surface ****************\n    vec3 transformedNormal = aNormal * uNormalTransform;\n    float lightIntensity = max( dot(transformedNormal, uLightDirection), 0.0) / 1.5;\n    color = color + uLightColor * lightIntensity;\n    vTexCoord = aTexCoord;\n    //*** vertical shading ******************************************************\n    float verticalShading = clamp((gradientHeight-pos.z) / (gradientHeight/gradientStrength), 0.0, gradientStrength);\n    //***************************************************************************\n    vColor = color-verticalShading;\n    vec4 worldPos = uModelMatrix * pos;\n    vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n    verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n  }\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nvarying vec3 vColor;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nuniform vec3 uFogColor;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nuniform sampler2D uWallTexIndex;\nvoid main() {\n    \n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  gl_FragColor = vec4( vColor* texture2D(uWallTexIndex, vTexCoord).rgb, 1.0-fogIntensity);\n}\n"},"buildings.shadows":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec3 aNormal;\nattribute vec3 aColor;\nattribute vec4 aFilter;\nattribute vec3 aID;\nattribute vec2 aTexCoord;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform mat4 uSunMatrix;\nuniform mat3 uNormalTransform;\nuniform vec3 uHighlightColor;\nuniform vec3 uHighlightID;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nuniform float uTime;\nvarying vec3 vColor;\nvarying vec2 vTexCoord;\nvarying vec3 vNormal;\nvarying vec3 vSunRelPosition;\nvarying float verticalDistanceToLowerEdge;\nfloat gradientHeight = 90.0;\nfloat gradientStrength = 0.4;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    vColor = vec3(0.0, 0.0, 0.0);\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    //*** highlight object ******************************************************\n    vec3 color = aColor;\n    if (uHighlightID == aID) {\n      color = mix(aColor, uHighlightColor, 0.5);\n    }\n    //*** light intensity, defined by light direction on surface ****************\n    vNormal = aNormal;\n    vTexCoord = aTexCoord;\n    //vec3 transformedNormal = aNormal * uNormalTransform;\n    //float lightIntensity = max( dot(aNormal, uLightDirection), 0.0) / 1.5;\n    //color = color + uLightColor * lightIntensity;\n    //*** vertical shading ******************************************************\n    float verticalShading = clamp((gradientHeight-pos.z) / (gradientHeight/gradientStrength), 0.0, gradientStrength);\n    //***************************************************************************\n    vColor = color-verticalShading;\n    vec4 worldPos = uModelMatrix * pos;\n    vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n    verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n    \n    // *** shadow mapping ********\n    vec4 sunRelPosition = uSunMatrix * pos;\n    vSunRelPosition = (sunRelPosition.xyz / sunRelPosition.w + 1.0) / 2.0;\n  }\n}\n","fragment":"\n#ifdef GL_FRAGMENT_PRECISION_HIGH\n  precision highp float;\n#else\n  precision mediump float;\n#endif\nvarying vec2 vTexCoord;\nvarying vec3 vColor;\nvarying vec3 vNormal;\nvarying vec3 vSunRelPosition;\nvarying float verticalDistanceToLowerEdge;\nuniform vec3 uFogColor;\nuniform vec2 uShadowTexDimensions;\nuniform sampler2D uShadowTexIndex;\nuniform sampler2D uWallTexIndex;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nuniform float uShadowStrength;\nuniform vec3 uLightDirection;\nuniform vec3 uLightColor;\nfloat isSeenBySun(const vec2 sunViewNDC, const float depth, const float bias) {\n  if ( clamp( sunViewNDC, 0.0, 1.0) != sunViewNDC)  //not inside sun's viewport\n    return 1.0;\n  \n  float depthFromTexture = texture2D( uShadowTexIndex, sunViewNDC.xy).x;\n  \n  //compare depth values not in reciprocal but in linear depth\n  return step(1.0/depthFromTexture, 1.0/depth + bias);\n}\nvoid main() {\n  vec3 normal = normalize(vNormal); //may degenerate during per-pixel interpolation\n  float diffuse = dot(uLightDirection, normal);\n  diffuse = max(diffuse, 0.0);\n  // reduce shadow strength with:\n  // - lowering sun positions, to be consistent with the shadows on the basemap (there,\n  //   shadows are faded out with lowering sun positions to hide shadow artifacts caused\n  //   when sun direction and map surface are almost perpendicular\n  // - large angles between the sun direction and the surface normal, to hide shadow\n  //   artifacts that occur when surface normal and sun direction are almost perpendicular\n  float shadowStrength = pow( max( min(\n    dot(uLightDirection, vec3(0.0, 0.0, 1.0)),\n    dot(uLightDirection, normal)\n  ), 0.0), 1.5);\n  if (diffuse > 0.0 && shadowStrength > 0.0) {\n    // note: the diffuse term is also the cosine between the surface normal and the\n    // light direction\n    float bias = clamp(0.0007*tan(acos(diffuse)), 0.0, 0.01);\n    vec2 pos = fract( vSunRelPosition.xy * uShadowTexDimensions);\n    \n    vec2 tl = floor(vSunRelPosition.xy * uShadowTexDimensions) / uShadowTexDimensions;\n    float tlVal = isSeenBySun( tl,                           vSunRelPosition.z, bias);\n    float trVal = isSeenBySun( tl + vec2(1.0, 0.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float blVal = isSeenBySun( tl + vec2(0.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float brVal = isSeenBySun( tl + vec2(1.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float occludedBySun = mix( \n                            mix(tlVal, trVal, pos.x), \n                            mix(blVal, brVal, pos.x),\n                            pos.y);\n    diffuse *= 1.0 - (shadowStrength * (1.0 - occludedBySun));\n  }\n  vec3 color = vColor* texture2D( uWallTexIndex, vTexCoord.st).rgb +\n              (diffuse/1.5) * uLightColor;\n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  //gl_FragColor = vec4( mix(color, uFogColor, fogIntensity), 1.0);\n  gl_FragColor = vec4( color, 1.0-fogIntensity);\n}\n"},"flatColor":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nuniform mat4 uMatrix;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform vec4 uColor;\nvoid main() {\n  gl_FragColor = uColor;\n}\n"},"skywall":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uMatrix;\nuniform float uAbsoluteHeight;\nvarying vec2 vTexCoord;\nvarying float vRelativeHeight;\nconst float gradientHeight = 10.0;\nconst float gradientStrength = 1.0;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n  vRelativeHeight = aPosition.z / uAbsoluteHeight;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nuniform vec3 uFogColor;\nvarying vec2 vTexCoord;\nvarying float vRelativeHeight;\nvoid main() {\n  float blendFactor = min(100.0 * vRelativeHeight, 1.0);\n  vec4 texColor = texture2D(uTexIndex, vTexCoord);\n  gl_FragColor = mix( vec4(uFogColor, 1.0), texColor,  blendFactor);\n}\n"},"basemap":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\n#define halfPi 1.57079632679\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uModelMatrix;\nuniform mat4 uViewMatrix;\nuniform mat4 uProjMatrix;\nuniform mat4 uMatrix;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n  vec4 worldPos = uModelMatrix * aPosition;\n  vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n  verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nuniform vec3 uFogColor;\nvarying vec2 vTexCoord;\nvarying float verticalDistanceToLowerEdge;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nvoid main() {\n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  gl_FragColor = vec4(texture2D(uTexIndex, vec2(vTexCoord.x, 1.0-vTexCoord.y)).rgb, 1.0-fogIntensity);\n}\n"},"texture":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uMatrix;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_FragColor = vec4(texture2D(uTexIndex, vTexCoord.st).rgb, 1.0);\n}\n"},"fogNormal":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec4 aFilter;\nattribute vec3 aNormal;\nuniform mat4 uMatrix;\nuniform mat4 uModelMatrix;\nuniform mat3 uNormalMatrix;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\nvarying float verticalDistanceToLowerEdge;\nvarying vec3 vNormal;\nuniform float uTime;\nvoid main() {\n  float t = clamp((uTime-aFilter.r) / (aFilter.g-aFilter.r), 0.0, 1.0);\n  float f = aFilter.b + (aFilter.a-aFilter.b) * t;\n  if (f == 0.0) {\n    gl_Position = vec4(0.0, 0.0, 0.0, 0.0);\n    verticalDistanceToLowerEdge = 0.0;\n  } else {\n    vec4 pos = vec4(aPosition.x, aPosition.y, aPosition.z*f, aPosition.w);\n    gl_Position = uMatrix * pos;\n    vNormal = uNormalMatrix * aNormal;\n    vec4 worldPos = uModelMatrix * pos;\n    vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n    verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n  }\n}\n","fragment":"\n#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nvarying float verticalDistanceToLowerEdge;\nvarying vec3 vNormal;\nvoid main() {\n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  gl_FragColor = vec4(normalize(vNormal) / 2.0 + 0.5, clamp(fogIntensity, 0.0, 1.0));\n}\n"},"ambientFromDepth":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_FRAGMENT_PRECISION_HIGH\n  // we need high precision for the depth values\n  precision highp float;\n#else\n  precision mediump float;\n#endif\nuniform sampler2D uDepthTexIndex;\nuniform sampler2D uFogTexIndex;\nuniform vec2 uInverseTexSize;   //in 1/pixels, e.g. 1/512 if the texture is 512px wide\nuniform float uEffectStrength;\nuniform float uNearPlane;\nuniform float uFarPlane;\nvarying vec2 vTexCoord;\n/* Retrieves the depth value 'offset' pixels away from 'pos' from texture 'uDepthTexIndex'. */\nfloat getDepth(vec2 pos, ivec2 offset)\n{\n  float z = texture2D(uDepthTexIndex, pos + float(offset) * uInverseTexSize).x;\n  return (2.0 * uNearPlane) / (uFarPlane + uNearPlane - z * (uFarPlane - uNearPlane)); // linearize depth\n}\n/* getOcclusionFactor() determines a heuristic factor (from [0..1]) for how \n * much the fragment at 'pos' with depth 'depthHere'is occluded by the \n * fragment that is (dx, dy) texels away from it.\n */\nfloat getOcclusionFactor(float depthHere, vec2 pos, ivec2 offset)\n{\n    float depthThere = getDepth(pos, offset);\n    /* if the fragment at (dx, dy) has no depth (i.e. there was nothing rendered there), \n     * then 'here' is not occluded (result 1.0) */\n    if (depthThere == 0.0)\n      return 1.0;\n    /* if the fragment at (dx, dy) is further away from the viewer than 'here', then\n     * 'here is not occluded' */\n    if (depthHere < depthThere )\n      return 1.0;\n      \n    float relDepthDiff = depthThere / depthHere;\n    float depthDiff = abs(depthThere - depthHere) * uFarPlane;\n    /* if the fragment at (dx, dy) is closer to the viewer than 'here', then it occludes\n     * 'here'. The occlusion is the higher the bigger the depth difference between the two\n     * locations is.\n     * However, if the depth difference is too high, we assume that 'there' lies in a\n     * completely different depth region of the scene than 'here' and thus cannot occlude\n     * 'here'. This last assumption gets rid of very dark artifacts around tall buildings.\n     */\n    return depthDiff < 50.0 ? mix(0.99, 1.0, 1.0 - clamp(depthDiff, 0.0, 1.0)) : 1.0;\n}\n/* This shader approximates the ambient occlusion in screen space (SSAO). \n * It is based on the assumption that a pixel will be occluded by neighboring \n * pixels iff. those have a depth value closer to the camera than the original\n * pixel itself (the function getOcclusionFactor() computes this occlusion \n * by a single other pixel).\n *\n * A naive approach would sample all pixels within a given distance. For an\n * interesting-looking effect, the sampling area needs to be at least 9 pixels \n * wide (-/+ 4), requiring 81 texture lookups per pixel for ambient occlusion.\n * This overburdens many GPUs.\n * To make the ambient occlusion computation faster, we do not consider all \n * texels in the sampling area, but only 16. This causes some sampling artifacts\n * that are later removed by blurring the ambient occlusion texture (this is \n * done in a separate shader).\n */\nvoid main() {\n  float depthHere = getDepth(vTexCoord, ivec2(0, 0));\n  float fogIntensity = texture2D(uFogTexIndex, vTexCoord).w;\n  if (depthHere == 0.0)\n  {\n\t//there was nothing rendered 'here' --> it can't be occluded\n    gl_FragColor = vec4(1.0);\n    return;\n  }\n  float occlusionFactor = 1.0;\n  \n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-1,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+1,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, -1));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, +1));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-2, -2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+2, +2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+2, -2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-2, +2));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-4,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+4,  0));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, -4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2( 0, +4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-4, -4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+4, +4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(+4, -4));\n  occlusionFactor *= getOcclusionFactor(depthHere, vTexCoord, ivec2(-4, +4));\n  occlusionFactor = pow(occlusionFactor, 4.0) + 55.0/255.0; // empirical bias determined to let SSAO have no effect on the map plane\n  occlusionFactor = 1.0 - ((1.0 - occlusionFactor) * uEffectStrength * (1.0-fogIntensity));\n  gl_FragColor = vec4(vec3(occlusionFactor), 1.0);\n}\n"},"blur":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_ES\n  precision mediump float;\n#endif\nuniform sampler2D uTexIndex;\nuniform vec2 uInverseTexSize;   //in 1/pixels, e.g. 1/512 if the texture is 512px wide\nvarying vec2 vTexCoord;\n/* Retrieves the texel color 'offset' pixels away from 'pos' from texture 'uTexIndex'. */\nvec4 getTexel(vec2 pos, vec2 offset)\n{\n  return texture2D(uTexIndex, pos + offset * uInverseTexSize);\n}\nvoid main() {\n  vec4 center = texture2D(uTexIndex, vTexCoord);\n  vec4 nonDiagonalNeighbors = getTexel(vTexCoord, vec2(-1.0,  0.0)) +\n                              getTexel(vTexCoord, vec2(+1.0,  0.0)) +\n                              getTexel(vTexCoord, vec2( 0.0, -1.0)) +\n                              getTexel(vTexCoord, vec2( 0.0, +1.0));\n  vec4 diagonalNeighbors =    getTexel(vTexCoord, vec2(-1.0, -1.0)) +\n                              getTexel(vTexCoord, vec2(+1.0, +1.0)) +\n                              getTexel(vTexCoord, vec2(-1.0, +1.0)) +\n                              getTexel(vTexCoord, vec2(+1.0, -1.0));\n  \n  //approximate Gaussian blur (mean 0.0, stdev 1.0)\n  gl_FragColor = 0.2/1.0 * center + \n                 0.5/4.0 * nonDiagonalNeighbors + \n                 0.3/4.0 * diagonalNeighbors;\n}\n"},"basemap.shadows":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec3 aPosition;\nattribute vec3 aNormal;\nuniform mat4 uModelMatrix;\nuniform mat4 uMatrix;\nuniform mat4 uSunMatrix;\nuniform vec2 uViewDirOnMap;\nuniform vec2 uLowerEdgePoint;\n//varying vec2 vTexCoord;\nvarying vec3 vSunRelPosition;\nvarying vec3 vNormal;\nvarying float verticalDistanceToLowerEdge;\nvoid main() {\n  vec4 pos = vec4(aPosition.xyz, 1.0);\n  gl_Position = uMatrix * pos;\n  vec4 sunRelPosition = uSunMatrix * pos;\n  vSunRelPosition = (sunRelPosition.xyz / sunRelPosition.w + 1.0) / 2.0;\n  vNormal = aNormal;\n  vec4 worldPos = uModelMatrix * pos;\n  vec2 dirFromLowerEdge = worldPos.xy / worldPos.w - uLowerEdgePoint;\n  verticalDistanceToLowerEdge = dot(dirFromLowerEdge, uViewDirOnMap);\n}\n","fragment":"\n#ifdef GL_FRAGMENT_PRECISION_HIGH\n  precision highp float;\n#else\n  precision mediump float;\n#endif\n/* This shader computes the diffuse brightness of the map layer. It does *not* \n * render the map texture itself, but is instead intended to be blended on top\n * of an already rendered map.\n * Note: this shader is not (and does not attempt to) be physically correct.\n *       It is intented to be a blend between a useful illustration of cast\n *       shadows and a mitigation of shadow casting artifacts occuring at\n *       low angles on incidence.\n *       Map brightness is only affected by shadows, not by light direction.\n *       Shadows are darkest when light comes from straight above (and thus\n *       shadows can be computed reliably) and become less and less visible\n *       with the light source close to the horizont (where moirC) and offset\n *       artifacts would otherwise be visible).\n */\n//uniform sampler2D uTexIndex;\nuniform sampler2D uShadowTexIndex;\nuniform vec3 uFogColor;\nuniform vec3 uDirToSun;\nuniform vec2 uShadowTexDimensions;\nuniform float uShadowStrength;\nvarying vec2 vTexCoord;\nvarying vec3 vSunRelPosition;\nvarying vec3 vNormal;\nvarying float verticalDistanceToLowerEdge;\nuniform float uFogDistance;\nuniform float uFogBlurDistance;\nfloat isSeenBySun( const vec2 sunViewNDC, const float depth, const float bias) {\n  if ( clamp( sunViewNDC, 0.0, 1.0) != sunViewNDC)  //not inside sun's viewport\n    return 1.0;\n  \n  float depthFromTexture = texture2D( uShadowTexIndex, sunViewNDC.xy).x;\n  \n  //compare depth values not in reciprocal but in linear depth\n  return step(1.0/depthFromTexture, 1.0/depth + bias);\n}\nvoid main() {\n  //vec2 tl = floor(vSunRelPosition.xy * uShadowTexDimensions) / uShadowTexDimensions;\n  //gl_FragColor = vec4(vec3(texture2D( uShadowTexIndex, tl).x), 1.0);\n  //return;\n  float diffuse = dot(uDirToSun, normalize(vNormal));\n  diffuse = max(diffuse, 0.0);\n  \n  float shadowStrength = uShadowStrength * pow(diffuse, 1.5);\n  if (diffuse > 0.0) {\n    // note: the diffuse term is also the cosine between the surface normal and the\n    // light direction\n    float bias = clamp(0.0007*tan(acos(diffuse)), 0.0, 0.01);\n    \n    vec2 pos = fract( vSunRelPosition.xy * uShadowTexDimensions);\n    \n    vec2 tl = floor(vSunRelPosition.xy * uShadowTexDimensions) / uShadowTexDimensions;\n    float tlVal = isSeenBySun( tl,                           vSunRelPosition.z, bias);\n    float trVal = isSeenBySun( tl + vec2(1.0, 0.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float blVal = isSeenBySun( tl + vec2(0.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    float brVal = isSeenBySun( tl + vec2(1.0, 1.0) / uShadowTexDimensions, vSunRelPosition.z, bias);\n    diffuse = mix( mix(tlVal, trVal, pos.x), \n                   mix(blVal, brVal, pos.x),\n                   pos.y);\n  }\n  diffuse = mix(1.0, diffuse, shadowStrength);\n  \n  float fogIntensity = (verticalDistanceToLowerEdge - uFogDistance) / uFogBlurDistance;\n  fogIntensity = clamp(fogIntensity, 0.0, 1.0);\n  float darkness = (1.0 - diffuse);\n  darkness *=  (1.0 - fogIntensity);\n  gl_FragColor = vec4(vec3(1.0 - darkness), 1.0);\n}\n"},"outlineMap":{"vertex":"precision highp float;  //is default in vertex shaders anyway, using highp fixes #49\nattribute vec4 aPosition;\nattribute vec2 aTexCoord;\nuniform mat4 uMatrix;\nvarying vec2 vTexCoord;\nvoid main() {\n  gl_Position = uMatrix * aPosition;\n  vTexCoord = aTexCoord;\n}\n","fragment":"#ifdef GL_FRAGMENT_PRECISION_HIGH\n  // we need high precision for the depth values\n  precision highp float;\n#else\n  precision mediump float;\n#endif\nuniform sampler2D uDepthTexIndex;\nuniform sampler2D uFogNormalTexIndex;\nuniform sampler2D uIdTexIndex;\nuniform vec2 uInverseTexSize;   //in 1/pixels, e.g. 1/512 if the texture is 512px wide\nuniform float uEffectStrength;\nuniform float uNearPlane;\nuniform float uFarPlane;\nvarying vec2 vTexCoord;\n/* Retrieves the depth value 'offset' pixels away from 'pos' from texture 'uDepthTexIndex'. */\nfloat getDepth(vec2 pos, vec2 offset)\n{\n  float z = texture2D(uDepthTexIndex, pos + offset * uInverseTexSize).x;\n  return (2.0 * uNearPlane) / (uFarPlane + uNearPlane - z * (uFarPlane - uNearPlane)); // linearize depth\n}\nvec3 getNormal(vec2 pos, vec2 offset)\n{\n  return normalize(texture2D(uFogNormalTexIndex, pos + offset * uInverseTexSize).xyz * 2.0 - 1.0);\n}\nvec3 getEncodedId(vec2 pos, vec2 offset)\n{\n  return texture2D(uIdTexIndex, pos + offset * uInverseTexSize).xyz;\n}\nvoid main() {\n  float fogIntensity = texture2D(uFogNormalTexIndex, vTexCoord).w;\n  vec3 normalHere =  getNormal(vTexCoord, vec2(0, 0));\n  vec3 normalRight = getNormal(vTexCoord, vec2(1, 0));\n  vec3 normalAbove = getNormal(vTexCoord, vec2(0,-1));\n  \n  float edgeStrengthFromNormal = \n    step( dot(normalHere, normalRight), 0.9) +\n    step( dot(normalHere, normalAbove), 0.9);\n  float depthHere =  getDepth(vTexCoord, vec2(0,  0));\n  float depthRight = getDepth(vTexCoord, vec2(1,  0));\n  float depthAbove = getDepth(vTexCoord, vec2(0, -1));\n  float depthDiffRight = abs(depthHere - depthRight) * 7500.0;\n  float depthDiffAbove = abs(depthHere - depthAbove) * 7500.0;\n  float edgeStrengthFromDepth = step(10.0, depthDiffRight) + \n                                step(10.0, depthDiffAbove);\n  \n  vec3 idHere = getEncodedId(vTexCoord, vec2(0,0));\n  vec3 idRight = getEncodedId(vTexCoord, vec2(1,0));\n  vec3 idAbove = getEncodedId(vTexCoord, vec2(0,-1));\n  float edgeStrengthFromId = (idHere != idRight || idHere != idAbove) ? 1.0 : 0.0;\n  \n  float edgeStrength = max( edgeStrengthFromId, max( edgeStrengthFromNormal, edgeStrengthFromDepth));\n  float occlusionFactor = 1.0 - (edgeStrength * uEffectStrength);\n  occlusionFactor = 1.0 - ((1.0- occlusionFactor) * (1.0-fogIntensity));\n  gl_FragColor = vec4(vec3(occlusionFactor), 1.0);\n}\n"}};
 
 
 var Grid = function(source, tileClass, options) {
@@ -4809,11 +4608,11 @@ mesh.GeoJSON = (function() {
         }
 
         if (endIndex === numFeatures) {
-          this.vertexBuffer   = new glx.Buffer(3, new Float32Array(res.vertices));
-          this.normalBuffer   = new glx.Buffer(3, new Float32Array(res.normals));
-          this.texCoordBuffer = new glx.Buffer(2, new Float32Array(res.texCoords));
-          this.colorBuffer    = new glx.Buffer(3, new Float32Array(res.colors));
-          this.idBuffer       = new glx.Buffer(3, new Float32Array(resPickingColors));
+          this.vertexBuffer   = new GLX.Buffer(3, new Float32Array(res.vertices));
+          this.normalBuffer   = new GLX.Buffer(3, new Float32Array(res.normals));
+          this.texCoordBuffer = new GLX.Buffer(2, new Float32Array(res.texCoords));
+          this.colorBuffer    = new GLX.Buffer(3, new Float32Array(res.colors));
+          this.idBuffer       = new GLX.Buffer(3, new Float32Array(resPickingColors));
           this.fadeIn();
 
           Filter.apply(this);
@@ -4844,7 +4643,7 @@ mesh.GeoJSON = (function() {
           filters.push.apply(filters, item.filter);
         }
       }
-      this.filterBuffer = new glx.Buffer(4, new Float32Array(filters));
+      this.filterBuffer = new GLX.Buffer(4, new Float32Array(filters));
     },
 
     applyFilter: function() {
@@ -4855,12 +4654,12 @@ mesh.GeoJSON = (function() {
           filters.push.apply(filters, item.filter);
         }
       }
-      this.filterBuffer = new glx.Buffer(4, new Float32Array(filters));
+      this.filterBuffer = new GLX.Buffer(4, new Float32Array(filters));
     },
 
     // TODO: switch to a notation like mesh.transform
     getMatrix: function() {
-      var matrix = new glx.Matrix();
+      var matrix = new GLX.Matrix();
 
       if (this.elevation) {
         matrix.translate(0, 0, this.elevation);
@@ -4987,9 +4786,9 @@ mesh.MapPlane = (function() {
           [].push.apply(this.filterBuffer, filterEntries);
       }
        
-      this.vertexBuffer = new glx.Buffer(3, new Float32Array(this.vertexBuffer));
-      this.normalBuffer = new glx.Buffer(3, new Float32Array(this.normalBuffer));
-      this.filterBuffer = new glx.Buffer(4, new Float32Array(this.filterBuffer));
+      this.vertexBuffer = new GLX.Buffer(3, new Float32Array(this.vertexBuffer));
+      this.normalBuffer = new GLX.Buffer(3, new Float32Array(this.normalBuffer));
+      this.filterBuffer = new GLX.Buffer(4, new Float32Array(this.filterBuffer));
        
     },
 
@@ -4997,7 +4796,7 @@ mesh.MapPlane = (function() {
     getMatrix: function() {
       //var scale = Math.pow(2, MAP.zoom - 16);
 
-      var modelMatrix = new glx.Matrix();
+      var modelMatrix = new GLX.Matrix();
       //modelMatrix.scale(scale, scale, scale);
     
       return modelMatrix;
@@ -5052,10 +4851,10 @@ mesh.DebugQuad = (function() {
         this.vertexBuffer.destroy();
 
       var vertices = [].concat(v1, v2, v3, v1, v3, v4);
-      this.vertexBuffer = new glx.Buffer(3, new Float32Array(vertices));
+      this.vertexBuffer = new GLX.Buffer(3, new Float32Array(vertices));
 
       /*
-      this.dummyMapPlaneTexCoords = new glx.Buffer(2, new Float32Array([
+      this.dummyMapPlaneTexCoords = new GLX.Buffer(2, new Float32Array([
         0.0, 0.0,
           1, 0.0,
           1,   1,
@@ -5067,7 +4866,7 @@ mesh.DebugQuad = (function() {
       if (this.normalBuffer)
         this.normalBuffer.destroy();
         
-      this.normalBuffer = new glx.Buffer(3, new Float32Array([
+      this.normalBuffer = new GLX.Buffer(3, new Float32Array([
         0, 0, 1,
         0, 0, 1,
         0, 0, 1,
@@ -5080,22 +4879,22 @@ mesh.DebugQuad = (function() {
       if (this.colorBuffer)
         this.colorBuffer.destroy();
         
-      this.colorBuffer = new glx.Buffer(3, new Float32Array(
+      this.colorBuffer = new GLX.Buffer(3, new Float32Array(
         [].concat(color, color, color, color, color, color)));
 
 
       if (this.idBuffer)
         this.idBuffer.destroy();
 
-      this.idBuffer = new glx.Buffer(3, new Float32Array(
+      this.idBuffer = new GLX.Buffer(3, new Float32Array(
         [].concat(color, color, color, color, color, color)));
         
-      this.texCoordBuffer = new glx.Buffer(2, new Float32Array(
+      this.texCoordBuffer = new GLX.Buffer(2, new Float32Array(
         [0,0,0,0,0,0,0,0,0,0,0,0]));
         
       var filter = [0,1,1,1];
       
-      this.filterBuffer = new glx.Buffer(4, new Float32Array(
+      this.filterBuffer = new GLX.Buffer(4, new Float32Array(
         [].concat(filter, filter, filter, filter, filter, filter)));
         
       //this.numDummyVertices = 6;
@@ -5104,7 +4903,7 @@ mesh.DebugQuad = (function() {
     // TODO: switch to a notation like mesh.transform
     getMatrix: function() {
       //var scale = render.fogRadius/this.radius;
-      var modelMatrix = new glx.Matrix();
+      var modelMatrix = new GLX.Matrix();
       //modelMatrix.scale(scale, scale, scale);
     
       return modelMatrix;
@@ -5226,8 +5025,7 @@ mesh.OBJ = (function() {
   function createGeometry(vertexIndex, faces) {
     var
       v0, v1, v2,
-      e1, e2,
-      nor, len,
+      nor,
       geometry = { vertices:[], normals:[], texCoords:[] };
 
     for (var i = 0, il = faces.length; i < il; i++) {
@@ -5351,7 +5149,7 @@ mesh.OBJ = (function() {
           filters.push.apply(filters, item.filter);
         }
       }
-      this.filterBuffer = new glx.Buffer(4, new Float32Array(filters));
+      this.filterBuffer = new GLX.Buffer(4, new Float32Array(filters));
     },
 
     applyFilter: function() {
@@ -5362,15 +5160,15 @@ mesh.OBJ = (function() {
           filters.push.apply(filters, item.filter);
         }
       }
-      this.filterBuffer = new glx.Buffer(4, new Float32Array(filters));
+      this.filterBuffer = new GLX.Buffer(4, new Float32Array(filters));
     },
 
     onReady: function() {
-      this.vertexBuffer   = new glx.Buffer(3, new Float32Array(this.data.vertices));
-      this.normalBuffer   = new glx.Buffer(3, new Float32Array(this.data.normals));
-      this.texCoordBuffer = new glx.Buffer(2, new Float32Array(this.data.texCoords));
-      this.colorBuffer    = new glx.Buffer(3, new Float32Array(this.data.colors));
-      this.idBuffer       = new glx.Buffer(3, new Float32Array(this.data.ids));
+      this.vertexBuffer   = new GLX.Buffer(3, new Float32Array(this.data.vertices));
+      this.normalBuffer   = new GLX.Buffer(3, new Float32Array(this.data.normals));
+      this.texCoordBuffer = new GLX.Buffer(2, new Float32Array(this.data.texCoords));
+      this.colorBuffer    = new GLX.Buffer(3, new Float32Array(this.data.colors));
+      this.idBuffer       = new GLX.Buffer(3, new Float32Array(this.data.ids));
       this.fadeIn();
       this.data = null;
 
@@ -5383,7 +5181,7 @@ mesh.OBJ = (function() {
 
     // TODO: switch to a notation like mesh.transform
     getMatrix: function() {
-      var matrix = new glx.Matrix();
+      var matrix = new GLX.Matrix();
 
       if (this.elevation) {
         matrix.translate(0, 0, this.elevation);
@@ -5617,7 +5415,7 @@ function getViewQuad(viewProjectionMatrix, maxFarEdgeDistance, viewDirOnMap) {
    * geometry is still visible */
   //console.log("FMED:", MAX_FAR_EDGE_DISTANCE);
 
-  var inverse = glx.Matrix.invert(viewProjectionMatrix);
+  var inverse = GLX.Matrix.invert(viewProjectionMatrix);
 
   var vBottomLeft  = getIntersectionWithXYPlane(-1, -1, inverse);
   var vBottomRight = getIntersectionWithXYPlane( 1, -1, inverse);
@@ -5696,7 +5494,7 @@ function getCoveringOrthoProjection(points, targetViewMatrix, near, far, height)
     bottom=Math.min( bottom,p[1]);
   }
   
-  return new glx.Matrix.Ortho(left, right, top, bottom, near, far);
+  return new GLX.Matrix.Ortho(left, right, top, bottom, near, far);
 }
 
 /* transforms the 3D vector 'v' according to the transformation matrix 'm'.
@@ -5754,13 +5552,13 @@ function getTileSizeOnScreen(tileX, tileY, tileZoom, viewProjMatrix) {
   var tileLon = tile2lon(tileX, tileZoom);
   var tileLat = tile2lat(tileY, tileZoom);
   
-  var modelMatrix = new glx.Matrix();
+  var modelMatrix = new GLX.Matrix();
   modelMatrix.translate( (tileLon - MAP.position.longitude)* metersPerDegreeLongitude,
                         -(tileLat - MAP.position.latitude) * METERS_PER_DEGREE_LATITUDE, 0);
 
   var size = getTileSizeInMeters( MAP.position.latitude, tileZoom);
   
-  var mvpMatrix = glx.Matrix.multiply(modelMatrix, viewProjMatrix);
+  var mvpMatrix = GLX.Matrix.multiply(modelMatrix, viewProjMatrix);
   var tl = transformVec3(mvpMatrix, [0   , 0   , 0]);
   var tr = transformVec3(mvpMatrix, [size, 0   , 0]);
   var bl = transformVec3(mvpMatrix, [0   , size, 0]);
@@ -5851,28 +5649,20 @@ var render = {
   start: function() {
     // disable effects if they rely on WebGL extensions
     // that the current hardware does not support
-    if (!gl.depthTextureExtension) {
+    if (!GL.depthTextureExtension) {
       console.log('[WARN] effects "shadows" and "outlines" disabled in OSMBuildings, because your GPU does not support WEBGL_depth_texture');
       //both effects rely on depth textures
       delete render.effects.shadows;
       delete render.effects.outlines;
     }
 
-    this.viewMatrix = new glx.Matrix();
-    this.projMatrix = new glx.Matrix();
-    this.viewProjMatrix = new glx.Matrix();
-    this.viewDirOnMap = [0.0, -1.0];
-
     MAP.on('change', this._onChange = this.onChange.bind(this));
-    this.onChange();
-
     MAP.on('resize', this._onResize = this.onResize.bind(this));
-    this.onResize();  //initialize projection matrix
-    this.onChange();  //initialize view matrix
+    this.onResize();  //initialize view and projection matrix, fog distance, etc.
 
-    gl.cullFace(gl.BACK);
-    gl.enable(gl.CULL_FACE);
-    gl.enable(gl.DEPTH_TEST);
+    GL.cullFace(GL.BACK);
+    GL.enable(GL.CULL_FACE);
+    GL.enable(GL.DEPTH_TEST);
 
     render.Picking.init(); // renders only on demand
     render.sky = new render.SkyWall();
@@ -5907,8 +5697,8 @@ var render = {
     requestAnimationFrame( this.renderFrame.bind(this));
 
     this.onChange();    
-    gl.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 0.0);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    GL.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 0.0);
+    GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
     if (MAP.zoom < APP.minZoom || MAP.zoom > APP.maxZoom) {
       return;
@@ -5938,17 +5728,17 @@ var render = {
           render.blurredOutlineMap.render(render.OutlineMap.framebuffer.renderTexture, viewSize);
       }
 
-      gl.enable(gl.BLEND);
+      GL.enable(GL.BLEND);
       if (render.effects.outlines) {
-        gl.blendFuncSeparate(gl.ZERO, gl.SRC_COLOR, gl.ZERO, gl.ONE); 
+        GL.blendFuncSeparate(GL.ZERO, GL.SRC_COLOR, GL.ZERO, GL.ONE);
         render.Overlay.render(render.blurredOutlineMap.framebuffer.renderTexture, viewSize);
       }
 
-      gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.DST_ALPHA, gl.ONE, gl.ONE); 
-      gl.disable(gl.DEPTH_TEST);      
+      GL.blendFuncSeparate(GL.ONE_MINUS_DST_ALPHA, GL.DST_ALPHA, GL.ONE, GL.ONE);
+      GL.disable(GL.DEPTH_TEST);
       render.sky.render();
-      gl.disable(gl.BLEND);
-      gl.enable(gl.DEPTH_TEST);
+      GL.disable(GL.BLEND);
+      GL.enable(GL.DEPTH_TEST);
     } else {
       render.cameraGBuffer.render(this.viewMatrix, this.projMatrix, viewSize, true);
       render.sunGBuffer.render(Sun.viewMatrix, Sun.projMatrix);
@@ -5967,13 +5757,13 @@ var render = {
         render.blurredOutlineMap.render(render.OutlineMap.framebuffer.renderTexture, viewSize);
       }
 
-      gl.enable(gl.BLEND);
+      GL.enable(GL.BLEND);
       {
         // multiply DEST_COLOR by SRC_COLOR, keep SRC alpha
         // this aplies the shadow and SSAO effects (which selectively darken the scene)
         // while keeping the alpha channel (that corresponds to how much the
         // geometry should be blurred into the background in the next step) intact
-        gl.blendFuncSeparate(gl.ZERO, gl.SRC_COLOR, gl.ZERO, gl.ONE); 
+        GL.blendFuncSeparate(GL.ZERO, GL.SRC_COLOR, GL.ZERO, GL.ONE);
         if (render.effects.outlines) {
           render.Overlay.render(render.blurredOutlineMap.framebuffer.renderTexture, viewSize);
         }
@@ -5984,22 +5774,22 @@ var render = {
         // linear interpolation between the colors of the current framebuffer 
         // ( =building geometries) and of the sky. The interpolation factor
         // is the geometry alpha value, which contains the 'foggyness' of each pixel
-        // the alpha interpolation functions is set to gl.ONE for both operands
+        // the alpha interpolation functions is set to GL.ONE for both operands
         // to ensure that the alpha channel will become 1.0 for each pixel after this
         // operation, and thus the whole canvas is not rendered partially transparently
         // over its background.
-        gl.blendFuncSeparate(gl.ONE_MINUS_DST_ALPHA, gl.DST_ALPHA, gl.ONE, gl.ONE);
-        gl.disable(gl.DEPTH_TEST);
+        GL.blendFuncSeparate(GL.ONE_MINUS_DST_ALPHA, GL.DST_ALPHA, GL.ONE, GL.ONE);
+        GL.disable(GL.DEPTH_TEST);
         render.sky.render();
-        gl.enable(gl.DEPTH_TEST);
+        GL.enable(GL.DEPTH_TEST);
       }
-      gl.disable(gl.BLEND);
+      GL.disable(GL.BLEND);
 
       //render.HudRect.render( render.sunGBuffer.getFogNormalTexture(), config );
     }
 
     if (this.screenshotCallback) {
-      this.screenshotCallback(gl.canvas.toDataURL());
+      this.screenshotCallback(GL.canvas.toDataURL());
       this.screenshotCallback = null;
     }  
   },
@@ -6007,25 +5797,7 @@ var render = {
   stop: function() {
     clearInterval(this.loop);
   },
-
-  updateFogDistance: function() {
-    var inverse = glx.Matrix.invert(this.viewProjMatrix.data);
-    
-    //need to store this as a reference point to determine fog distance
-    this.lowerLeftOnMap = getIntersectionWithXYPlane(-1, -1, inverse);
-    if (this.lowerLeftOnMap === undefined) {
-      return;
-    }
-
-    var lowerLeftDistanceToCenter = len2(this.lowerLeftOnMap);
-
-    /* fogDistance: closest distance at which the fog affects the geometry */
-    this.fogDistance = Math.max(3000, lowerLeftDistanceToCenter);
-    /* fogBlurDistance: closest distance *beyond* fogDistance at which everything is
-     *                  completely enclosed in fog. */
-    this.fogBlurDistance = 500;
-  },
-
+  
   onChange: function() {
     var 
       scale = 1.38*Math.pow(2, MAP.zoom-17),
@@ -6034,16 +5806,15 @@ var render = {
       refHeight = 1024,
       refVFOV = 45;
 
-    glx.context.viewport(0, 0, width, height);
+    GL.viewport(0, 0, width, height);
 
-    this.viewMatrix = new glx.Matrix()
+    this.viewMatrix = new GLX.Matrix()
       .rotateZ(MAP.rotation)
       .rotateX(MAP.tilt)
       .translate(0, 0, -1220/scale); //move away to simulate zoom; -1220 scales MAP tiles to ~256px
 
     this.viewDirOnMap = [ Math.sin(MAP.rotation / 180* Math.PI),
                          -Math.cos(MAP.rotation / 180* Math.PI)];
-
 
     // OSMBuildings' perspective camera is ... special: The reference point for
     // camera movement, rotation and zoom is at the screen center (as usual). 
@@ -6060,19 +5831,32 @@ var render = {
     //    internal reasons).
     // 3. shift the geometry back down half a screen now *in screen coordinates*
 
-    this.projMatrix = new glx.Matrix()
+    this.projMatrix = new GLX.Matrix()
       .translate(0, -height/(2.0*scale), 0) // 0, MAP y offset to neutralize camera y offset, 
       .scale(1, -1, 1) // flip Y
-      .multiply(new glx.Matrix.Perspective(refVFOV * height / refHeight, width/height, 1, 7500))
+      .multiply(new GLX.Matrix.Perspective(refVFOV * height / refHeight, width/height, 1, 7500))
       .translate(0, -1, 0); // camera y offset
 
-    this.viewProjMatrix = new glx.Matrix(glx.Matrix.multiply(this.viewMatrix, this.projMatrix));
-    this.updateFogDistance();
+    this.viewProjMatrix = new GLX.Matrix(GLX.Matrix.multiply(this.viewMatrix, this.projMatrix));
+
+    //need to store this as a reference point to determine fog distance
+    this.lowerLeftOnMap = getIntersectionWithXYPlane(-1, -1, GLX.Matrix.invert(this.viewProjMatrix.data));
+    if (this.lowerLeftOnMap === undefined) {
+      return;
+    }
+
+    var lowerLeftDistanceToCenter = len2(this.lowerLeftOnMap);
+
+    /* fogDistance: closest distance at which the fog affects the geometry */
+    this.fogDistance = Math.max(3000, lowerLeftDistanceToCenter);
+    /* fogBlurDistance: closest distance *beyond* fogDistance at which everything is
+     *                  completely enclosed in fog. */
+    this.fogBlurDistance = 500;
   },
 
   onResize: function() {
-    glx.context.canvas.width  = MAP.width;
-    glx.context.canvas.height = MAP.height;
+    GL.canvas.width  = MAP.width;
+    GL.canvas.height = MAP.height;
     this.onChange();
   },
 
@@ -6109,7 +5893,7 @@ render.Picking = {
   viewportSize: 512,
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader: Shaders.picking.vertex,
       fragmentShader: Shaders.picking.fragment,
       shaderName: 'picking shader',
@@ -6122,7 +5906,7 @@ render.Picking = {
       ]
     });
 
-    this.framebuffer = new glx.Framebuffer(this.viewportSize, this.viewportSize);
+    this.framebuffer = new GLX.Framebuffer(this.viewportSize, this.viewportSize);
   },
 
   render: function(framebufferSize) {
@@ -6134,10 +5918,10 @@ render.Picking = {
     
     shader.enable();
     framebuffer.enable();
-    gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+    GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
 
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    GL.clearColor(0, 0, 0, 1);
+    GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
     shader.setUniforms([
       ['uFogRadius', '1f', render.fogDistance],
@@ -6162,19 +5946,19 @@ render.Picking = {
 
       shader.setUniformMatrices([
         ['uModelMatrix', '4fv', modelMatrix.data],
-        ['uMatrix',      '4fv', glx.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
+        ['uMatrix',      '4fv', GLX.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
       ]);
 
       shader.bindBuffer(item.vertexBuffer, 'aPosition');
       shader.bindBuffer(item.idBuffer, 'aID');
       shader.bindBuffer(item.filterBuffer, 'aFilter');
 
-      gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+      GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
     }
 
     this.shader.disable();
     this.framebuffer.disable();
-    gl.viewport(0, 0, MAP.width, MAP.height);
+    GL.viewport(0, 0, MAP.width, MAP.height);
   },
   
   // TODO: throttle calls
@@ -6229,7 +6013,7 @@ var Sun = {
     var rotationInDeg = pos.azimuth / (Math.PI/180);
     var tiltInDeg     = 90 - pos.altitude / (Math.PI/180);
 
-    this.viewMatrix = new glx.Matrix()
+    this.viewMatrix = new GLX.Matrix()
       .rotateZ(rotationInDeg)
       .rotateX(tiltInDeg)
       .translate(0, 0, -5000)
@@ -6245,7 +6029,7 @@ var Sun = {
       7500
     );
 
-    this.viewProjMatrix = new glx.Matrix(glx.Matrix.multiply(this.viewMatrix, this.projMatrix));
+    this.viewProjMatrix = new GLX.Matrix(GLX.Matrix.multiply(this.viewMatrix, this.projMatrix));
   }
 };
 
@@ -6255,7 +6039,7 @@ render.SkyWall = function() {
   this.v1 = this.v2 = this.v3 = this.v4 = [false, false, false];
   this.updateGeometry( [[0,0,0], [0,0,0], [0,0,0], [0,0,0]]);
 
-  this.shader = new glx.Shader({
+  this.shader = new GLX.Shader({
     vertexShader: Shaders.skywall.vertex,
     fragmentShader: Shaders.skywall.fragment,
     shaderName: 'sky wall shader',
@@ -6263,7 +6047,7 @@ render.SkyWall = function() {
     uniforms: ['uAbsoluteHeight', 'uMatrix', 'uTexIndex', 'uFogColor']
   });
   
-  this.floorShader = new glx.Shader({
+  this.floorShader = new GLX.Shader({
     vertexShader:   Shaders.flatColor.vertex,
     fragmentShader: Shaders.flatColor.fragment,
     attributes: ['aPosition'],
@@ -6272,7 +6056,7 @@ render.SkyWall = function() {
   
   Activity.setBusy();
   var url = APP.baseURL + '/skydome.jpg';
-  this.texture = new glx.texture.Image().load(url, function(image) {
+  this.texture = new GLX.texture.Image().load(url, function(image) {
     Activity.setIdle();
     if (image) {
       this.isReady = true;
@@ -6302,12 +6086,12 @@ render.SkyWall.prototype.updateGeometry = function(viewTrapezoid) {
     this.vertexBuffer.destroy();
 
   var vertices = [].concat(v1, v2, v3, v1, v3, v4);
-  this.vertexBuffer = new glx.Buffer(3, new Float32Array(vertices));
+  this.vertexBuffer = new GLX.Buffer(3, new Float32Array(vertices));
 
   if (this.texCoordBuffer)
     this.texCoordBuffer.destroy();
 
-  var inverse = glx.Matrix.invert(render.viewProjMatrix.data);
+  var inverse = GLX.Matrix.invert(render.viewProjMatrix.data);
   var vBottomCenter = getIntersectionWithXYPlane(0, -1, inverse);
   
   var vLeftDir = norm2(sub2( v1, vBottomCenter));
@@ -6323,7 +6107,7 @@ render.SkyWall.prototype.updateGeometry = function(viewTrapezoid) {
   var tcLeft = vLeftArc;//MAP.rotation/360.0;
   var tcRight =vRightArc;//MAP.rotation/360.0 + visibleSkyDiameterFraction*3;
         
-  this.texCoordBuffer = new glx.Buffer(2, new Float32Array(
+  this.texCoordBuffer = new GLX.Buffer(2, new Float32Array(
     [tcLeft, 1, tcRight, 1, tcRight, 0, tcLeft, 1, tcRight, 0, tcLeft, 0]));
     
   v1 = [viewTrapezoid[0][0], viewTrapezoid[0][1], 1.0];
@@ -6334,7 +6118,7 @@ render.SkyWall.prototype.updateGeometry = function(viewTrapezoid) {
   if (this.floorVertexBuffer)
     this.floorVertexBuffer.destroy();
     
-  this.floorVertexBuffer = new glx.Buffer(3, new Float32Array(
+  this.floorVertexBuffer = new GLX.Buffer(3, new Float32Array(
     [].concat( v1, v2, v3, v4)));
 };
 
@@ -6361,7 +6145,7 @@ render.SkyWall.prototype.render = function() {
 
   shader.bindTexture('uTexIndex', 0, this.texture);
 
-  gl.drawArrays(gl.TRIANGLES, 0, this.vertexBuffer.numItems);
+  GL.drawArrays(GL.TRIANGLES, 0, this.vertexBuffer.numItems);
   shader.disable();
   
 
@@ -6369,7 +6153,7 @@ render.SkyWall.prototype.render = function() {
   this.floorShader.setUniform('uColor', '4fv', fogColor.concat([1.0]));
   this.floorShader.setUniformMatrix('uMatrix', '4fv', render.viewProjMatrix.data);
   this.floorShader.bindBuffer(this.floorVertexBuffer, 'aPosition');
-  gl.drawArrays(gl.TRIANGLE_FAN, 0, this.floorVertexBuffer.numItems);
+  GL.drawArrays(GL.TRIANGLE_FAN, 0, this.floorVertexBuffer.numItems);
   
   this.floorShader.disable();
   
@@ -6386,7 +6170,7 @@ render.Buildings = {
   init: function() {
   
     this.shader = !render.effects.shadows ?
-      new glx.Shader({
+      new GLX.Shader({
         vertexShader: Shaders.buildings.vertex,
         fragmentShader: Shaders.buildings.fragment,
         shaderName: 'building shader',
@@ -6406,7 +6190,7 @@ render.Buildings = {
           'uTime',
           'uWallTexIndex'
         ]
-      }) : new glx.Shader({
+      }) : new GLX.Shader({
         vertexShader: Shaders['buildings.shadows'].vertex,
         fragmentShader: Shaders['buildings.shadows'].fragment,
         shaderName: 'quality building shader',
@@ -6430,7 +6214,7 @@ render.Buildings = {
         ]
     });
     
-    this.wallTexture = new glx.texture.Image();
+    this.wallTexture = new GLX.texture.Image();
     this.wallTexture.color( [1,1,1]);
     this.wallTexture.load( BUILDING_TEXTURE);
   },
@@ -6441,7 +6225,7 @@ render.Buildings = {
     shader.enable();
 
     if (this.showBackfaces) {
-      gl.disable(gl.CULL_FACE);
+      GL.disable(GL.CULL_FACE);
     }
 
     if (!this.highlightID) {
@@ -6461,7 +6245,7 @@ render.Buildings = {
     ]);
 
     if (!render.effects.shadows) {
-      shader.setUniformMatrix('uNormalTransform', '3fv', glx.Matrix.identity3().data);
+      shader.setUniformMatrix('uNormalTransform', '3fv', GLX.Matrix.identity3().data);
     }
 
     shader.bindTexture('uWallTexIndex', 0, this.wallTexture);
@@ -6487,11 +6271,11 @@ render.Buildings = {
 
       shader.setUniformMatrices([
         ['uModelMatrix', '4fv', modelMatrix.data],
-        ['uMatrix',      '4fv', glx.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
+        ['uMatrix',      '4fv', GLX.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
       ]);
       
       if (render.effects.shadows) {
-        shader.setUniformMatrix('uSunMatrix', '4fv', glx.Matrix.multiply(modelMatrix, Sun.viewProjMatrix));
+        shader.setUniformMatrix('uSunMatrix', '4fv', GLX.Matrix.multiply(modelMatrix, Sun.viewProjMatrix));
       }
 
       shader.bindBuffer(item.vertexBuffer,   'aPosition');
@@ -6501,11 +6285,11 @@ render.Buildings = {
       shader.bindBuffer(item.filterBuffer,   'aFilter');
       shader.bindBuffer(item.idBuffer,       'aID');
 
-      gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+      GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
     }
 
     if (this.showBackfaces) {
-      gl.enable(gl.CULL_FACE);
+      GL.enable(GL.CULL_FACE);
     }
 
     shader.disable();
@@ -6523,7 +6307,7 @@ render.Buildings = {
 render.MapShadows = {
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader: Shaders['basemap.shadows'].vertex,
       fragmentShader: Shaders['basemap.shadows'].fragment,
       shaderName: 'map shadows shader',
@@ -6551,7 +6335,7 @@ render.MapShadows = {
     shader.enable();
 
     if (this.showBackfaces) {
-      gl.disable(gl.CULL_FACE);
+      GL.disable(GL.CULL_FACE);
     }
 
     shader.setUniforms([
@@ -6578,17 +6362,17 @@ render.MapShadows = {
 
     shader.setUniformMatrices([
       ['uModelMatrix', '4fv', modelMatrix.data],
-      ['uMatrix',      '4fv', glx.Matrix.multiply(modelMatrix, render.viewProjMatrix)],
-      ['uSunMatrix',   '4fv', glx.Matrix.multiply(modelMatrix, Sun.viewProjMatrix)]
+      ['uMatrix',      '4fv', GLX.Matrix.multiply(modelMatrix, render.viewProjMatrix)],
+      ['uSunMatrix',   '4fv', GLX.Matrix.multiply(modelMatrix, Sun.viewProjMatrix)]
     ]);
 
     shader.bindBuffer(item.vertexBuffer, 'aPosition');
     shader.bindBuffer(item.normalBuffer, 'aNormal');
 
-    gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
 
     if (this.showBackfaces) {
-      gl.enable(gl.CULL_FACE);
+      GL.enable(GL.CULL_FACE);
     }
 
     shader.disable();
@@ -6601,7 +6385,7 @@ render.MapShadows = {
 render.Basemap = {
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader: Shaders.basemap.vertex,
       fragmentShader: Shaders.basemap.fragment,
       shaderName: 'basemap shader',
@@ -6671,12 +6455,12 @@ render.Basemap = {
     var metersPerDegreeLongitude = METERS_PER_DEGREE_LATITUDE * 
                                    Math.cos(MAP.position.latitude / 180 * Math.PI);
 
-    var modelMatrix = new glx.Matrix();
+    var modelMatrix = new GLX.Matrix();
     modelMatrix.translate( (tile.longitude- MAP.position.longitude)* metersPerDegreeLongitude,
                           -(tile.latitude - MAP.position.latitude) * METERS_PER_DEGREE_LATITUDE, 0);
 
-    gl.enable(gl.POLYGON_OFFSET_FILL);
-    gl.polygonOffset(MAX_USED_ZOOM_LEVEL - tile.zoom, 
+    GL.enable(GL.POLYGON_OFFSET_FILL);
+    GL.polygonOffset(MAX_USED_ZOOM_LEVEL - tile.zoom,
                      MAX_USED_ZOOM_LEVEL - tile.zoom);
                      
     shader.setUniforms([
@@ -6686,15 +6470,15 @@ render.Basemap = {
 
     shader.setUniformMatrices([
       ['uModelMatrix', '4fv', modelMatrix.data],
-      ['uMatrix',      '4fv', glx.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
+      ['uMatrix',      '4fv', GLX.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
     ]);
 
     shader.bindBuffer(tile.vertexBuffer,  'aPosition');
     shader.bindBuffer(tile.texCoordBuffer,'aTexCoord');
     shader.bindTexture('uTexIndex', 0, tile.texture);
 
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, tile.vertexBuffer.numItems);
-    gl.disable(gl.POLYGON_OFFSET_FILL);
+    GL.drawArrays(GL.TRIANGLE_STRIP, 0, tile.vertexBuffer.numItems);
+    GL.disable(GL.POLYGON_OFFSET_FILL);
   },
 
   destroy: function() {}
@@ -6709,10 +6493,10 @@ render.HudRect = {
   init: function() {
   
     var geometry = this.createGeometry();
-    this.vertexBuffer   = new glx.Buffer(3, new Float32Array(geometry.vertices));
-    this.texCoordBuffer = new glx.Buffer(2, new Float32Array(geometry.texCoords));
+    this.vertexBuffer   = new GLX.Buffer(3, new Float32Array(geometry.vertices));
+    this.texCoordBuffer = new GLX.Buffer(2, new Float32Array(geometry.texCoords));
 
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader: Shaders.texture.vertex,
       fragmentShader: Shaders.texture.fragment,
       shaderName: 'HUD rectangle shader',
@@ -6748,18 +6532,18 @@ render.HudRect = {
 
     shader.enable();
     
-    gl.uniformMatrix4fv(shader.uniforms.uMatrix, false, glx.Matrix.identity().data);
+    GL.uniformMatrix4fv(shader.uniforms.uMatrix, false, GLX.Matrix.identity().data);
     this.vertexBuffer.enable();
 
-    gl.vertexAttribPointer(shader.attributes.aPosition, this.vertexBuffer.itemSize, gl.FLOAT, false, 0, 0);
+    GL.vertexAttribPointer(shader.attributes.aPosition, this.vertexBuffer.itemSize, GL.FLOAT, false, 0, 0);
 
     this.texCoordBuffer.enable();
-    gl.vertexAttribPointer(shader.attributes.aTexCoord, this.texCoordBuffer.itemSize, gl.FLOAT, false, 0, 0);
+    GL.vertexAttribPointer(shader.attributes.aTexCoord, this.texCoordBuffer.itemSize, GL.FLOAT, false, 0, 0);
 
     texture.enable(0);
-    gl.uniform1i(shader.uniforms.uTexIndex, 0);
+    GL.uniform1i(shader.uniforms.uTexIndex, 0);
 
-    gl.drawArrays(gl.TRIANGLES, 0, this.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, this.vertexBuffer.numItems);
 
     shader.disable();
   },
@@ -6778,7 +6562,7 @@ render.HudRect = {
 */
 
 render.DepthFogNormalMap = function() {
-  this.shader = new glx.Shader({
+  this.shader = new GLX.Shader({
     vertexShader: Shaders.fogNormal.vertex,
     fragmentShader: Shaders.fogNormal.fragment,
     shaderName: 'fog/normal shader',
@@ -6786,7 +6570,7 @@ render.DepthFogNormalMap = function() {
     uniforms: ['uMatrix', 'uModelMatrix', 'uNormalMatrix', 'uTime', 'uFogDistance', 'uFogBlurDistance', 'uViewDirOnMap', 'uLowerEdgePoint']
   });
   
-  this.framebuffer = new glx.Framebuffer(128, 128, /*depthTexture=*/true); //dummy sizes, will be resized dynamically
+  this.framebuffer = new GLX.Framebuffer(128, 128, /*depthTexture=*/true); //dummy sizes, will be resized dynamically
 
   this.mapPlane = new mesh.MapPlane();
 };
@@ -6805,17 +6589,17 @@ render.DepthFogNormalMap.prototype.render = function(viewMatrix, projMatrix, fra
   var
     shader = this.shader,
     framebuffer = this.framebuffer,
-    viewProjMatrix = new glx.Matrix(glx.Matrix.multiply(viewMatrix,projMatrix));
+    viewProjMatrix = new GLX.Matrix(GLX.Matrix.multiply(viewMatrix,projMatrix));
 
   framebufferSize = framebufferSize || this.framebufferSize;
   framebuffer.setSize( framebufferSize[0], framebufferSize[1] );
     
   shader.enable();
   framebuffer.enable();
-  gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+  GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
 
-  gl.clearColor(0.0, 0.0, 0.0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  GL.clearColor(0.0, 0.0, 0.0, 1);
+  GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
   var item, modelMatrix;
 
@@ -6844,22 +6628,22 @@ render.DepthFogNormalMap.prototype.render = function(viewMatrix, projMatrix, fra
     ]);
 
     shader.setUniformMatrices([
-      ['uMatrix',       '4fv', glx.Matrix.multiply(modelMatrix, viewProjMatrix)],
+      ['uMatrix',       '4fv', GLX.Matrix.multiply(modelMatrix, viewProjMatrix)],
       ['uModelMatrix',  '4fv', modelMatrix.data],
-      ['uNormalMatrix', '3fv', glx.Matrix.transpose3(glx.Matrix.invert3(glx.Matrix.multiply(modelMatrix, viewMatrix)))]
+      ['uNormalMatrix', '3fv', GLX.Matrix.transpose3(GLX.Matrix.invert3(GLX.Matrix.multiply(modelMatrix, viewMatrix)))]
     ]);
     
     shader.bindBuffer(item.vertexBuffer, 'aPosition');
     shader.bindBuffer(item.normalBuffer, 'aNormal');
     shader.bindBuffer(item.filterBuffer, 'aFilter');
 
-    gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
   }
 
   shader.disable();
   framebuffer.disable();
 
-  gl.viewport(0, 0, MAP.width, MAP.height);
+  GL.viewport(0, 0, MAP.width, MAP.height);
 };
 
 render.DepthFogNormalMap.prototype.destroy = function() {};
@@ -6868,7 +6652,7 @@ render.DepthFogNormalMap.prototype.destroy = function() {};
 render.AmbientMap = {
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader:   Shaders.ambientFromDepth.vertex,
       fragmentShader: Shaders.ambientFromDepth.fragment,
       shaderName: 'SSAO shader',
@@ -6876,9 +6660,9 @@ render.AmbientMap = {
       uniforms: ['uInverseTexSize', 'uNearPlane', 'uFarPlane', 'uDepthTexIndex', 'uFogTexIndex', 'uEffectStrength']
     });
 
-    this.framebuffer = new glx.Framebuffer(128, 128); //dummy value, size will be set dynamically
+    this.framebuffer = new GLX.Framebuffer(128, 128); //dummy value, size will be set dynamically
     
-    this.vertexBuffer = new glx.Buffer(3, new Float32Array([
+    this.vertexBuffer = new GLX.Buffer(3, new Float32Array([
       -1, -1, 1E-5,
        1, -1, 1E-5,
        1,  1, 1E-5,
@@ -6887,7 +6671,7 @@ render.AmbientMap = {
       -1,  1, 1E-5
     ]));
        
-    this.texCoordBuffer = new glx.Buffer(2, new Float32Array([
+    this.texCoordBuffer = new GLX.Buffer(2, new Float32Array([
       0,0,
       1,0,
       1,1,
@@ -6909,12 +6693,12 @@ render.AmbientMap = {
 
     framebuffer.setSize( framebufferSize[0], framebufferSize[1] );
 
-    gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+    GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
     shader.enable();
     framebuffer.enable();
 
-    gl.clearColor(1.0, 0.0, 0.0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    GL.clearColor(1.0, 0.0, 0.0, 1);
+    GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
     shader.setUniforms([
       ['uInverseTexSize', '2fv', [1/framebufferSize[0], 1/framebufferSize[1]]],
@@ -6929,12 +6713,12 @@ render.AmbientMap = {
     shader.bindTexture('uDepthTexIndex', 0, depthTexture);
     shader.bindTexture('uFogTexIndex',   1, fogTexture);
 
-    gl.drawArrays(gl.TRIANGLES, 0, this.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, this.vertexBuffer.numItems);
 
     shader.disable();
     framebuffer.disable();
 
-    gl.viewport(0, 0, MAP.width, MAP.height);
+    GL.viewport(0, 0, MAP.width, MAP.height);
 
   },
 
@@ -6950,10 +6734,10 @@ render.Overlay = {
   init: function() {
   
     var geometry = this.createGeometry();
-    this.vertexBuffer   = new glx.Buffer(3, new Float32Array(geometry.vertices));
-    this.texCoordBuffer = new glx.Buffer(2, new Float32Array(geometry.texCoords));
+    this.vertexBuffer   = new GLX.Buffer(3, new Float32Array(geometry.vertices));
+    this.texCoordBuffer = new GLX.Buffer(2, new Float32Array(geometry.texCoords));
 
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader: Shaders.texture.vertex,
       fragmentShader: Shaders.texture.fragment,
       shaderName: 'overlay texture shader',
@@ -6991,17 +6775,17 @@ render.Overlay = {
     shader.enable();
     /* we are rendering an *overlay*, which is supposed to be rendered on top of the
      * scene no matter what its actual depth is. */
-    gl.disable(gl.DEPTH_TEST);    
+    GL.disable(GL.DEPTH_TEST);
     
-    shader.setUniformMatrix('uMatrix', '4fv', glx.Matrix.identity().data);
+    shader.setUniformMatrix('uMatrix', '4fv', GLX.Matrix.identity().data);
 
     shader.bindBuffer(this.vertexBuffer,  'aPosition');
     shader.bindBuffer(this.texCoordBuffer,'aTexCoord');
     shader.bindTexture('uTexIndex', 0, texture);
 
-    gl.drawArrays(gl.TRIANGLES, 0, this.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, this.vertexBuffer.numItems);
 
-    gl.enable(gl.DEPTH_TEST);
+    GL.enable(GL.DEPTH_TEST);
     shader.disable();
   },
 
@@ -7012,7 +6796,7 @@ render.Overlay = {
 render.OutlineMap = {
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader:   Shaders.outlineMap.vertex,
       fragmentShader: Shaders.outlineMap.fragment,
       shaderName: 'outline map shader',
@@ -7020,9 +6804,9 @@ render.OutlineMap = {
       uniforms: ['uMatrix', 'uInverseTexSize', 'uNearPlane', 'uFarPlane', 'uDepthTexIndex', 'uFogNormalTexIndex', 'uIdTexIndex', 'uEffectStrength']
     });
 
-    this.framebuffer = new glx.Framebuffer(128, 128); //dummy value, size will be set dynamically
+    this.framebuffer = new GLX.Framebuffer(128, 128); //dummy value, size will be set dynamically
     
-    this.vertexBuffer = new glx.Buffer(3, new Float32Array([
+    this.vertexBuffer = new GLX.Buffer(3, new Float32Array([
       -1, -1, 1E-5,
        1, -1, 1E-5,
        1,  1, 1E-5,
@@ -7031,7 +6815,7 @@ render.OutlineMap = {
       -1,  1, 1E-5
     ]));
        
-    this.texCoordBuffer = new glx.Buffer(2, new Float32Array([
+    this.texCoordBuffer = new GLX.Buffer(2, new Float32Array([
       0,0,
       1,0,
       1,1,
@@ -7053,14 +6837,14 @@ render.OutlineMap = {
 
     framebuffer.setSize( framebufferSize[0], framebufferSize[1] );
 
-    gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+    GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
     shader.enable();
     framebuffer.enable();
 
-    gl.clearColor(1.0, 0.0, 0.0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    GL.clearColor(1.0, 0.0, 0.0, 1);
+    GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
-    gl.uniformMatrix4fv(shader.uniforms.uMatrix, false, glx.Matrix.identity().data);
+    GL.uniformMatrix4fv(shader.uniforms.uMatrix, false, GLX.Matrix.identity().data);
 
     shader.setUniforms([
       ['uInverseTexSize', '2fv', [1/framebufferSize[0], 1/framebufferSize[1]]],
@@ -7076,12 +6860,12 @@ render.OutlineMap = {
     shader.bindTexture('uFogNormalTexIndex',1, fogNormalTexture);
     shader.bindTexture('uIdTexIndex',       2, idTexture);
 
-    gl.drawArrays(gl.TRIANGLES, 0, this.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, this.vertexBuffer.numItems);
 
     shader.disable();
     framebuffer.disable();
 
-    gl.viewport(0, 0, MAP.width, MAP.height);
+    GL.viewport(0, 0, MAP.width, MAP.height);
 
   },
 
@@ -7090,7 +6874,7 @@ render.OutlineMap = {
 
 
 render.Blur = function() {
-  this.shader = new glx.Shader({
+  this.shader = new GLX.Shader({
     vertexShader:   Shaders.blur.vertex,
     fragmentShader: Shaders.blur.fragment,
     shaderName: 'blur shader',
@@ -7098,9 +6882,9 @@ render.Blur = function() {
     uniforms: ['uInverseTexSize', 'uTexIndex']
   });
 
-  this.framebuffer = new glx.Framebuffer(128, 128); //dummy value, size will be set dynamically
+  this.framebuffer = new GLX.Framebuffer(128, 128); //dummy value, size will be set dynamically
   
-  this.vertexBuffer = new glx.Buffer(3, new Float32Array([
+  this.vertexBuffer = new GLX.Buffer(3, new Float32Array([
     -1, -1, 1E-5,
      1, -1, 1E-5,
      1,  1, 1E-5,
@@ -7109,7 +6893,7 @@ render.Blur = function() {
     -1,  1, 1E-5
   ]));
      
-  this.texCoordBuffer = new glx.Buffer(2, new Float32Array([
+  this.texCoordBuffer = new GLX.Buffer(2, new Float32Array([
     0,0,
     1,0,
     1,1,
@@ -7126,24 +6910,24 @@ render.Blur.prototype.render = function(inputTexture, framebufferSize) {
 
   framebuffer.setSize( framebufferSize[0], framebufferSize[1] );
 
-  gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+  GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
   shader.enable();
   framebuffer.enable();
 
-  gl.clearColor(1.0, 0.0, 0, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  GL.clearColor(1.0, 0.0, 0, 1);
+  GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
   shader.setUniform('uInverseTexSize', '2fv', [1/framebuffer.width, 1/framebuffer.height]);
   shader.bindBuffer(this.vertexBuffer,  'aPosition');
   shader.bindBuffer(this.texCoordBuffer,'aTexCoord');
   shader.bindTexture('uTexIndex', 0, inputTexture);
 
-  gl.drawArrays(gl.TRIANGLES, 0, this.vertexBuffer.numItems);
+  GL.drawArrays(GL.TRIANGLES, 0, this.vertexBuffer.numItems);
 
   shader.disable();
   framebuffer.disable();
 
-  gl.viewport(0, 0, MAP.width, MAP.height);
+  GL.viewport(0, 0, MAP.width, MAP.height);
 };
 
 render.Blur.prototype.destroy = function() 
@@ -7183,22 +6967,22 @@ basemap.Tile = function(x, y, zoom) {
     0, 1
   ];
 
-  this.vertexBuffer = new glx.Buffer(3, new Float32Array(vertices));
-  this.texCoordBuffer = new glx.Buffer(2, new Float32Array(texCoords));
+  this.vertexBuffer = new GLX.Buffer(3, new Float32Array(vertices));
+  this.texCoordBuffer = new GLX.Buffer(2, new Float32Array(texCoords));
 };
 
 basemap.Tile.prototype = {
   load: function(url) {
     Activity.setBusy();
-    this.texture = new glx.texture.Image().load(url, function(image) {
+    this.texture = new GLX.texture.Image().load(url, function(image) {
       Activity.setIdle();
       if (image) {
         this.isReady = true;
         /* The whole texture will be mapped to fit the whole tile exactly. So
          * don't attempt to wrap around the texture coordinates. */
-        gl.bindTexture(gl.TEXTURE_2D, this.texture.id);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        GL.bindTexture(GL.TEXTURE_2D, this.texture.id);
+        GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
+        GL.texParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
       }
     }.bind(this));
   },
@@ -7211,5 +6995,5 @@ basemap.Tile.prototype = {
     }
   }
 };
-}(this));
+}());
 //# sourceMappingURL=OSMBuildings.debug.js.map

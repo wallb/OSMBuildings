@@ -1,6 +1,8 @@
 
 var baseURL = '../';
 
+//*****************************************************************************
+
 function loadFile(url) {
   var xhr = new XMLHttpRequest();
   xhr.open('GET', url, false);
@@ -36,27 +38,48 @@ function loadShaders(config) {
   return 'var Shaders = '+ JSON.stringify(Shaders) +';\n';
 }
 
+//*****************************************************************************
+
 var config = JSON.parse(loadFile(baseURL +'config.json'));
+var js = '';
+js += "(function() {";
 
-var file, str, js = '';
-var global = this;
+// modules
 
-for (var i = 0; i < config.lib.length; i++) {
-  js += loadFile(baseURL + config.lib[i]) +'\n\n';
+for (var i = 0; i < config.modules.length; i++) {
+  js += loadFile(baseURL + config.modules[i]) + '\n';
 }
+
+// shaders
+
+js += loadShaders(config.shaders);
+
+// GLX
+
+js += "var GLX = (function() {";
+for (var i = 0; i < config.glx.length; i++) {
+  js += loadFile(baseURL + config.glx[i]) + '\n';
+}
+js += "\nreturn GLX;\n}());\n";
+
+// GLMap
+
+js += "var GLMap = (function() {";
+for (var i = 0; i < config.glmap.length; i++) {
+  js += loadFile(baseURL + config.glmap[i]) + '\n';
+}
+js += "\nreturn GLMap;\n}());\n";
+js += "\nwindow.GLMap = GLMap;\n";
+
+// OSMB core
 
 for (var i = 0; i < config.src.length; i++) {
-  file = config.src[i];
-
-  if (file === 'src/shaders.js') {
-    str = loadShaders(config.shaders);
-  } else {
-    str = loadFile(baseURL + file);
-  }
-
-  js += '//****** file: '+ file +' ******\n\n';
-  js += str +'\n\n';
+  js += loadFile(baseURL + config.src[i]) + '\n';
 }
+
+
+js += "}());";
+
 
 try {
   eval(js);

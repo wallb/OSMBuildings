@@ -2,7 +2,7 @@
 render.AmbientMap = {
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader:   Shaders.ambientFromDepth.vertex,
       fragmentShader: Shaders.ambientFromDepth.fragment,
       shaderName: 'SSAO shader',
@@ -10,9 +10,9 @@ render.AmbientMap = {
       uniforms: ['uInverseTexSize', 'uNearPlane', 'uFarPlane', 'uDepthTexIndex', 'uFogTexIndex', 'uEffectStrength']
     });
 
-    this.framebuffer = new glx.Framebuffer(128, 128); //dummy value, size will be set dynamically
+    this.framebuffer = new GLX.Framebuffer(128, 128); //dummy value, size will be set dynamically
     
-    this.vertexBuffer = new glx.Buffer(3, new Float32Array([
+    this.vertexBuffer = new GLX.Buffer(3, new Float32Array([
       -1, -1, 1E-5,
        1, -1, 1E-5,
        1,  1, 1E-5,
@@ -21,7 +21,7 @@ render.AmbientMap = {
       -1,  1, 1E-5
     ]));
        
-    this.texCoordBuffer = new glx.Buffer(2, new Float32Array([
+    this.texCoordBuffer = new GLX.Buffer(2, new Float32Array([
       0,0,
       1,0,
       1,1,
@@ -43,12 +43,12 @@ render.AmbientMap = {
 
     framebuffer.setSize( framebufferSize[0], framebufferSize[1] );
 
-    gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+    GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
     shader.enable();
     framebuffer.enable();
 
-    gl.clearColor(1.0, 0.0, 0.0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    GL.clearColor(1.0, 0.0, 0.0, 1);
+    GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
     shader.setUniforms([
       ['uInverseTexSize', '2fv', [1/framebufferSize[0], 1/framebufferSize[1]]],
@@ -63,12 +63,12 @@ render.AmbientMap = {
     shader.bindTexture('uDepthTexIndex', 0, depthTexture);
     shader.bindTexture('uFogTexIndex',   1, fogTexture);
 
-    gl.drawArrays(gl.TRIANGLES, 0, this.vertexBuffer.numItems);
+    GL.drawArrays(GL.TRIANGLES, 0, this.vertexBuffer.numItems);
 
     shader.disable();
     framebuffer.disable();
 
-    gl.viewport(0, 0, MAP.width, MAP.height);
+    GL.viewport(0, 0, MAP.width, MAP.height);
 
   },
 

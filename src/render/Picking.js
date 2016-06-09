@@ -7,7 +7,7 @@ render.Picking = {
   viewportSize: 512,
 
   init: function() {
-    this.shader = new glx.Shader({
+    this.shader = new GLX.Shader({
       vertexShader: Shaders.picking.vertex,
       fragmentShader: Shaders.picking.fragment,
       shaderName: 'picking shader',
@@ -20,7 +20,7 @@ render.Picking = {
       ]
     });
 
-    this.framebuffer = new glx.Framebuffer(this.viewportSize, this.viewportSize);
+    this.framebuffer = new GLX.Framebuffer(this.viewportSize, this.viewportSize);
   },
 
   render: function(framebufferSize) {
@@ -32,10 +32,10 @@ render.Picking = {
     
     shader.enable();
     framebuffer.enable();
-    gl.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
+    GL.viewport(0, 0, framebufferSize[0], framebufferSize[1]);
 
-    gl.clearColor(0, 0, 0, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    GL.clearColor(0, 0, 0, 1);
+    GL.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
 
     shader.setUniforms([
       ['uFogRadius', '1f', render.fogDistance],
@@ -60,19 +60,19 @@ render.Picking = {
 
       shader.setUniformMatrices([
         ['uModelMatrix', '4fv', modelMatrix.data],
-        ['uMatrix',      '4fv', glx.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
+        ['uMatrix',      '4fv', GLX.Matrix.multiply(modelMatrix, render.viewProjMatrix)]
       ]);
 
       shader.bindBuffer(item.vertexBuffer, 'aPosition');
       shader.bindBuffer(item.idBuffer, 'aID');
       shader.bindBuffer(item.filterBuffer, 'aFilter');
 
-      gl.drawArrays(gl.TRIANGLES, 0, item.vertexBuffer.numItems);
+      GL.drawArrays(GL.TRIANGLES, 0, item.vertexBuffer.numItems);
     }
 
     this.shader.disable();
     this.framebuffer.disable();
-    gl.viewport(0, 0, MAP.width, MAP.height);
+    GL.viewport(0, 0, MAP.width, MAP.height);
   },
   
   // TODO: throttle calls
