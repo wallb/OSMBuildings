@@ -204,7 +204,7 @@ Events.init = function(map) {
     }
 
     if (!Events.disabled) {
-      var adjust = 0.2*(delta>0 ? 1 : delta<0 ? -1 : 0);
+      var adjust = 0.2*(delta>0 ? 0.1 : delta<0 ? -0.1 : 0);
       map.setZoom(map.zoom + adjust, e);
     }
 
