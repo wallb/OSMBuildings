@@ -294,9 +294,11 @@ Events.init = function(map) {
     }
 
     startOffset = getElementOffset(e.target);
-    var pos = getEventPosition(e, offset);
+    var pos = getEventPosition(e, startOffset);
     startX = prevX = pos.x;
     startY = prevY = pos.y;
+
+    pointerIsDown = true;
 
     map.emit('pointerdown', { x: pos.x, y: pos.y, button: 0 });
   }
@@ -311,7 +313,9 @@ Events.init = function(map) {
         emitGestureChange(e);
       }
     } else {
-      moveMap(e.touches[0], startOffset);
+      if (pointerIsDown) {
+        moveMap(e.touches[0], startOffset);
+      }
       map.emit('pointermove', { x: pos.x, y: pos.y });
     }
     prevX = pos.x;
@@ -323,6 +327,7 @@ Events.init = function(map) {
     gestureStarted = false;
 
     if (e.touches.length === 0) {
+      pointerIsDown = false;
       map.emit('pointerup', { x: prevX, y: prevY, button: 0 });
     } else if (e.touches.length === 1) {
       // There is one touch currently on the surface => gesture ended. Prepare for continued single touch move
