@@ -189,6 +189,8 @@ mesh.GeoJSON = (function() {
         this.colorBuffer.destroy();
         this.idBuffer.destroy();
       }
+
+      render.FrameControl.requestFrame();
     }
   };
 
